@@ -28,13 +28,9 @@ android {
 
     buildTypes {
         release {
+            // Scoped R8 optimization breaks Kotlin access checks during OkHttp startup.
             optimization {
-                enable = true
-                packageScope = setOf(
-                    "androidx.**",
-                    "kotlin.**",
-                    "kotlinx.**"
-                )
+                enable = false
             }
         }
     }
