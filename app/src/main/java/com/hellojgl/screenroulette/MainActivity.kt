@@ -695,6 +695,7 @@ private suspend fun fetchCategoryRecommendations(
     var diagnosticPages = 0
     var diagnosticExcluded = 0
     var diagnosticParsed = 0
+    var diagnosticFailedPages = 0
 
     val isTV = category == ContentCategory.TV_SERIES
 
@@ -790,8 +791,12 @@ private suspend fun fetchCategoryRecommendations(
     // Adaptive discovery: search more pages only when necessary.
     val remainingPages = (2..totalPages).shuffled().take(40)
 
+    // Build a wider selection before choosing five titles.
+    // The existing page limit prevents unlimited searching.
+    val targetCandidateCount = 20
+
     for (batch in remainingPages.chunked(4)) {
-        if (candidates.size >= 5) break
+        if (candidates.size >= targetCandidateCount) break
 
         kotlinx.coroutines.coroutineScope {
             batch.map { page ->
@@ -804,11 +809,20 @@ private suspend fun fetchCategoryRecommendations(
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
+                        android.util.Log.w(
+                            "ScreenRouletteSpin",
+                            "TMDB discovery page $page failed",
+                            e
+                        )
                         null
                     }
                 }
-            }.awaitAll().filterNotNull().forEach { response ->
-                collect(response)
+            }.awaitAll().forEach { response ->
+                if (response == null) {
+                    diagnosticFailedPages++
+                } else {
+                    collect(response)
+                }
             }
         }
     }
@@ -821,16 +835,25 @@ private suspend fun fetchCategoryRecommendations(
         "category=$category " +
         "pages=$diagnosticPages " +
         "parsed=$diagnosticParsed " +
+        "failedPages=$diagnosticFailedPages " +
         "excluded=$diagnosticExcluded " +
         "eligible=${candidates.size} " +
         "previouslySeen=${excludedIds.size} " +
         "durationMs=$elapsed"
     )
 
+    if (candidates.isEmpty() && diagnosticFailedPages > 0) {
+        throw java.io.IOException(
+            "Some film requests failed and no matching " +
+            "recommendations could be retrieved. " +
+            "Please check your connection and try again."
+        )
+    }
+
     return candidates.shuffled().take(5)
 }
 
-private fun matchesOriginalLanguage(
+internal fun matchesOriginalLanguage(
     movie: Movie,
     filters: MovieFilters
 ): Boolean {
@@ -843,7 +866,7 @@ private fun matchesOriginalLanguage(
     }
 }
 
-private fun movieMatchesFilters(
+internal fun movieMatchesFilters(
     movie: Movie,
     filters: MovieFilters
 ): Boolean {
@@ -1587,18 +1610,46 @@ fun ScreenRouletteScreen(
             }
 
             if (verifiedMovies.isEmpty() && seenIds.isNotEmpty()) {
-                // Restart the recommendation cycle when history
-                // prevents any matching titles being returned.
-                seenIds = emptySet()
-                rollNumber++
+                // Retry once without the previously viewed history.
+                // This does not trigger another LaunchedEffect.
+                val retryMovies = fetchCategoryRecommendations(
+                    category = selectedCategory,
+                    excludedIds = emptySet(),
+                    filters = activeFilters
+                )
+
+                val retryVerified = retryMovies.filter {
+                    movieMatchesFilters(
+                        it,
+                        if (selectedCategory == ContentCategory.DOCUMENTARIES) {
+                            activeFilters.copy(
+                                genreIds = setOf(99),
+                                matchAll = false
+                            )
+                        } else {
+                            activeFilters
+                        }
+                    )
+                }
+
+                if (retryVerified.isNotEmpty()) {
+                    recommendations = retryVerified
+                    seenIds = retryVerified.map { it.id }.toSet()
+
+                    android.util.Log.d(
+                        "ScreenRouletteSpin",
+                        "Recommendation history reset after exhaustion"
+                    )
+                } else {
+                    error = "No matching recommendations found. " +
+                        "Try broader filters."
+                }
             } else if (verifiedMovies.isEmpty()) {
-                error =
-                    "No matching films found. " +
+                error = "No matching recommendations found. " +
                     "Try broader filters."
             } else {
                 recommendations = verifiedMovies
-                seenIds = seenIds +
-                        verifiedMovies.map { it.id }
+                seenIds = seenIds + verifiedMovies.map { it.id }
             }
         } catch (e: CancellationException) {
             throw e
