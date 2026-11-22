@@ -1790,7 +1790,11 @@ fun ScreenRouletteScreen(
                             recommendations,
                             key = { it.id }
                         ) { movie ->
-                            MovieCard(movie, selectedCategory) {
+                            MovieCard(
+                                movie = movie,
+                                category = selectedCategory,
+                                streamingRegion = activeFilters.streamingRegion
+                            ) {
                                 navigationStack.add(movie)
                             }
                         }
@@ -1845,12 +1849,53 @@ private fun MoviePoster(
 }
 
 // Step 42: Compact recommendation cards
+// Step 43: Streaming availability on cards
 @Composable
 private fun MovieCard(
     movie: Movie,
     category: ContentCategory,
+    streamingRegion: String,
     onClick: () -> Unit
 ) {
+    var availability by remember(
+        movie.id, category, streamingRegion
+    ) {
+        mutableStateOf<StreamingAvailability?>(null)
+    }
+
+    var availabilityLoading by remember(
+        movie.id, category, streamingRegion
+    ) {
+        mutableStateOf(streamingRegion.isNotBlank())
+    }
+
+    var availabilityError by remember(
+        movie.id, category, streamingRegion
+    ) {
+        mutableStateOf(false)
+    }
+
+    LaunchedEffect(movie.id, category, streamingRegion) {
+        availability = null
+        availabilityError = false
+        availabilityLoading = streamingRegion.isNotBlank()
+
+        if (streamingRegion.isNotBlank()) {
+            try {
+                availability = fetchStreamingAvailability(
+                    movie.id,
+                    category,
+                    streamingRegion
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                availabilityError = true
+            } finally {
+                availabilityLoading = false
+            }
+        }
+    }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1924,6 +1969,34 @@ private fun MovieCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                if (streamingRegion.isNotBlank()) {
+                    HorizontalDivider()
+
+                    val streamingText = when {
+                        availabilityLoading ->
+                            "Checking streaming services…"
+
+                        availabilityError ->
+                            "Streaming information unavailable"
+
+                        availability == null ->
+                            "Streaming information unavailable"
+
+                        availability!!.subscription.isNotEmpty() ->
+                            "Streaming: " +
+                                availability!!.subscription.joinToString(", ")
+
+                        else ->
+                            "No streaming information reported"
+                    }
+
+                    Text(
+                        text = streamingText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
 
                 Text(
                     text = "View details",
@@ -2121,12 +2194,6 @@ private fun MovieDetailsScreen(
                     Text("Subscription / free / ads: " +
                         availability.subscription.ifEmpty { listOf("Not listed") }
                             .joinToString(", "))
-                    Text("Rent: " +
-                        availability.rent.ifEmpty { listOf("Not listed") }
-                            .joinToString(", "))
-                    Text("Buy: " +
-                        availability.buy.ifEmpty { listOf("Not listed") }
-                            .joinToString(", "))
                     Text(
                         "Provider information supplied by TMDB/JustWatch; " +
                             "availability may change.",
@@ -2177,7 +2244,11 @@ private fun MovieDetailsScreen(
                     similarMovies,
                     key = { it.id }
                 ) { similar ->
-                    MovieCard(similar, category) {
+                    MovieCard(
+                        movie = similar,
+                        category = category,
+                        streamingRegion = streamingRegion
+                    ) {
                         onMovieSelected(similar)
                     }
                 }
