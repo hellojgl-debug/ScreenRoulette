@@ -5,7 +5,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// Load API keys from local.properties
+// Load API credentials from local.properties
 val localProperties = Properties().apply {
     val propertiesFile = rootProject.file("local.properties")
 
@@ -35,7 +35,7 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // TMDB API key
+        // TMDB API Read Access Token
         buildConfigField(
             "String",
             "TMDB_API_KEY",
@@ -90,6 +90,10 @@ dependencies {
 
     // Networking for TMDB and OMDb
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Film poster loading with Coil 3
+    implementation("io.coil-kt.coil3:coil-compose:3.3.0")
+    implementation("io.coil-kt.coil3:coil-network-okhttp:3.3.0")
 
     // Unit tests
     testImplementation(libs.junit)
