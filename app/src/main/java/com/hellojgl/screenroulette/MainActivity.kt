@@ -50,6 +50,90 @@ import org.json.JSONArray
 import java.util.Calendar
 import java.util.Locale
 
+
+// Step 5: Animated roulette loading indicator
+@Composable
+private fun RouletteLoadingIndicator() {
+    val transition = rememberInfiniteTransition(
+        label = "rouletteLoading"
+    )
+
+    val angle by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(
+                durationMillis = 1100,
+                easing = LinearEasing
+            )
+        ),
+        label = "rouletteRotation"
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Canvas(
+            modifier = Modifier.size(42.dp)
+        ) {
+            val radius = size.minDimension / 2f
+            val centre = Offset(size.width / 2f, size.height / 2f)
+
+            drawCircle(
+                color = Color(0xFFD6B66A),
+                radius = radius
+            )
+
+            drawCircle(
+                color = Color(0xFF10291F),
+                radius = radius * 0.87f
+            )
+
+            rotate(angle, pivot = centre) {
+                for (index in 0 until 12) {
+                    val start = index * 30f - 90f
+                    drawArc(
+                        color = if (index % 2 == 0)
+                            Color(0xFFB3262E)
+                        else
+                            Color(0xFF181818),
+                        startAngle = start,
+                        sweepAngle = 29f,
+                        useCenter = true,
+                        topLeft = Offset(
+                            centre.x - radius * 0.79f,
+                            centre.y - radius * 0.79f
+                        ),
+                        size = androidx.compose.ui.geometry.Size(
+                            radius * 1.58f,
+                            radius * 1.58f
+                        )
+                    )
+                }
+            }
+
+            drawCircle(
+                color = Color(0xFFD6B66A),
+                radius = radius * 0.20f
+            )
+
+            drawCircle(
+                color = Color(0xFF10291F),
+                radius = radius * 0.11f
+            )
+        }
+
+        Spacer(Modifier.width(12.dp))
+
+        Text(
+            "Spinning the roulette...",
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
+
 data class Movie(
     val id: Int,
     val title: String,
@@ -184,6 +268,7 @@ private val genreNames = movieGenres.associate {
     it.id to it.name
 }
 
+// Step 4: Roulette button styling
 private val httpClient = OkHttpClient()
 
 // Performance optimisation 2: TMDB response cache
@@ -1630,7 +1715,15 @@ fun ScreenRouletteScreen(
 
                 OutlinedButton(
                     onClick = { showWatchlist = true },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        androidx.compose.ui.graphics.Color(0xFFD6B66A)
+                    ),
+                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                        contentColor = androidx.compose.ui.graphics.Color(0xFFD6B66A)
+                    )
                 ) {
                     Text("My Watchlist (${watchlist.size})")
                 }
@@ -2219,7 +2312,15 @@ fun ScreenRouletteScreen(
                                 }
                             },
                             enabled = !loading,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                androidx.compose.ui.graphics.Color(0xFFF28B88)
+                            ),
+                            colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                                contentColor = androidx.compose.ui.graphics.Color(0xFFF28B88)
+                            )
                         ) {
                             Text("Reset to Defaults")
                         }
@@ -2270,7 +2371,12 @@ fun ScreenRouletteScreen(
                                 }
                             },
                             enabled = !loading,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                containerColor = androidx.compose.ui.graphics.Color(0xFF146B48),
+                                contentColor = androidx.compose.ui.graphics.Color.White
+                            )
                         ) {
                             Text("Apply Filters")
                         }
@@ -2286,7 +2392,12 @@ fun ScreenRouletteScreen(
                 ) {
                     Button(
                         onClick = { rollNumber++ },
-                        enabled = !loading
+                        enabled = !loading,
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                            containerColor = androidx.compose.ui.graphics.Color(0xFFD6B66A),
+                            contentColor = androidx.compose.ui.graphics.Color(0xFF172719)
+                        )
                     ) {
                         Text("Roll Again")
                     }
@@ -2297,7 +2408,7 @@ fun ScreenRouletteScreen(
                 Spacer(Modifier.height(12.dp))
 
                 if (loading) {
-                    CircularProgressIndicator()
+                    RouletteLoadingIndicator()
                     Spacer(Modifier.height(12.dp))
                 }
 
