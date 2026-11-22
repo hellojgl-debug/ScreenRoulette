@@ -1844,6 +1844,7 @@ private fun MoviePoster(
     }
 }
 
+// Step 42: Compact recommendation cards
 @Composable
 private fun MovieCard(
     movie: Movie,
@@ -1857,43 +1858,76 @@ private fun MovieCard(
     ) {
         Row(
             modifier = Modifier.padding(12.dp),
-            horizontalArrangement =
-                Arrangement.spacedBy(14.dp)
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top
         ) {
             MoviePoster(
                 movie = movie,
                 modifier = Modifier
-                    .width(95.dp)
-                    .height(140.dp)
+                    .width(90.dp)
+                    .height(135.dp)
             )
 
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement =
-                    Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(7.dp)
             ) {
                 Text(
-                    movie.title,
+                    text = movie.title,
                     style = MaterialTheme.typography.titleMedium
                 )
 
-                Text(if (category == ContentCategory.TV_SERIES) "First aired: ${movie.year}" else "Year: ${movie.year}")
+                Text(
+                    text = if (category == ContentCategory.TV_SERIES) {
+                        "TV Series • ${movie.year}"
+                    } else if (category == ContentCategory.DOCUMENTARIES) {
+                        "Documentary • ${movie.year}"
+                    } else {
+                        "Film • ${movie.year}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
-                Text("TMDB: ${movie.rating}/10")
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer
+                    ) {
+                        Text(
+                            text = "★ ${movie.rating}/10",
+                            modifier = Modifier.padding(
+                                horizontal = 8.dp,
+                                vertical = 4.dp
+                            ),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
 
-                    Text(
-                        "Original Language: ${movie.originalLanguage}",
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    if (movie.originalLanguage.isNotBlank()) {
+                        Text(
+                            text = movie.originalLanguage.uppercase(
+                                Locale.ROOT
+                            ),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
 
                 Text(
-                    "Genres: ${titleGenreLabel(movie, category)}",
-                    style = MaterialTheme.typography.bodySmall
+                    text = titleGenreLabel(movie, category),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
                 Text(
-                    "Tap for details",
-                    style = MaterialTheme.typography.bodySmall,
+                    text = "View details",
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary
                 )
             }
