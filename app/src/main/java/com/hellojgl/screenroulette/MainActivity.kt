@@ -1,6 +1,7 @@
 package com.hellojgl.screenroulette
 
 import android.os.Bundle
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.drawscope.rotate
 import kotlinx.coroutines.launch
@@ -20,6 +21,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -48,10 +50,13 @@ import org.json.JSONObject
 import org.json.JSONArray
 import java.util.Calendar
 import java.util.Locale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 
 
 // Static roulette loading indicator
 @Composable
+// SCREENROULETTE_TOUCH_ACCESSIBILITY_V2
 private fun RouletteLoadingIndicator() {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -85,8 +90,9 @@ private fun RouletteLoadingIndicator() {
                         Color(0xFF181818)
                     },
                     startAngle = index * 30f - 90f,
-                    sweepAngle = 29f,
+                    sweepAngle = 27.5f,
                     useCenter = true,
+                    style = androidx.compose.ui.graphics.drawscope.Fill,
                     topLeft = Offset(
                         centre.x - radius * 0.79f,
                         centre.y - radius * 0.79f
@@ -850,54 +856,29 @@ private suspend fun fetchCategoryRecommendations(
         )
     }
 
-    return candidates.shuffled().take(5)
+    return selectSpinRecommendations(
+        candidates = candidates,
+        excludedIds = emptySet(),
+        filters = effectiveFilters
+    )
 }
 
-internal fun matchesOriginalLanguage(
-    movie: Movie,
-    filters: MovieFilters
-): Boolean {
-    return when (filters.originalLanguageFilter) {
-        "en" -> movie.originalLanguage == "en"
-        "international" ->
-            movie.originalLanguage.isNotBlank() &&
-                movie.originalLanguage != "en"
-        else -> true
-    }
-}
+internal fun selectSpinRecommendations(
+    candidates: List<Movie>,
+    excludedIds: Set<Int>,
+    filters: MovieFilters,
+    limit: Int = 5
+): List<Movie> {
+    if (limit <= 0) return emptyList()
 
-internal fun movieMatchesFilters(
-    movie: Movie,
-    filters: MovieFilters
-): Boolean {
-    val year = movie.year.toIntOrNull() ?: return false
-
-    if (year !in filters.startYear..filters.endYear) {
-        return false
-    }
-
-    if (!matchesOriginalLanguage(movie, filters)) {
-        return false
-    }
-
-    if (filters.minRating > 0.0) {
-        val rating = movie.rating.toDoubleOrNull()
-            ?: return false
-
-        if (rating < filters.minRating) {
-            return false
-        }
-    }
-
-    if (filters.genreIds.isEmpty()) {
-        return true
-    }
-
-    return if (filters.matchAll) {
-        movie.genreIds.containsAll(filters.genreIds)
-    } else {
-        movie.genreIds.any { it in filters.genreIds }
-    }
+    return candidates
+        .asSequence()
+        .filter { it.id !in excludedIds }
+        .filter { movieMatchesFilters(it, filters) }
+        .distinctBy { it.id }
+        .toList()
+        .shuffled()
+        .take(limit)
 }
 
 private suspend fun fetchRecommendations(
@@ -1186,7 +1167,7 @@ private fun RouletteSplashScreen() {
                             color = colour,
                             startAngle = -90f +
                                 i * sweep - sweep / 2f,
-                            sweepAngle = sweep,
+                            sweepAngle = sweep - 0.8f,
                             useCenter = true,
                             topLeft = Offset(
                                 cx - radius * 0.86f,
@@ -1198,6 +1179,16 @@ private fun RouletteSplashScreen() {
                             )
                         )
                     }
+
+                    // SCREENROULETTE_ACCESSIBLE_POCKETS_V1
+                    // Pocket boundaries remain visible without colour.
+                    drawCircle(
+                        color = Color(0xFFFFE6A3),
+                        radius = radius * 0.86f,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(
+                            width = 1.5.dp.toPx()
+                        )
+                    )
 
                     drawCircle(
                         color = gold,
@@ -1227,7 +1218,7 @@ private fun RouletteSplashScreen() {
                             color = android.graphics.Color.WHITE
                             textAlign =
                                 android.graphics.Paint.Align.CENTER
-                            textSize = radius * 0.095f
+                            textSize = radius * 0.105f
                             typeface = android.graphics.Typeface
                                 .create(
                                     android.graphics.Typeface.DEFAULT,
@@ -1583,6 +1574,9 @@ fun ScreenRouletteScreen(
     // A new request is triggered whenever the active
     // filters or roll number changes.
     LaunchedEffect(selectedCategory, activeFilters, rollNumber) {
+        val spinStart = android.os.SystemClock.elapsedRealtime()
+        var spinRetried = false
+
         loading = true
         error = null
         recommendations = emptyList()
@@ -1612,6 +1606,7 @@ fun ScreenRouletteScreen(
             if (verifiedMovies.isEmpty() && seenIds.isNotEmpty()) {
                 // Retry once without the previously viewed history.
                 // This does not trigger another LaunchedEffect.
+                spinRetried = true
                 val retryMovies = fetchCategoryRecommendations(
                     category = selectedCategory,
                     excludedIds = emptySet(),
@@ -1656,6 +1651,19 @@ fun ScreenRouletteScreen(
         } catch (e: Exception) {
             error = e.message ?: "Unable to load films"
         } finally {
+            val spinDuration =
+                android.os.SystemClock.elapsedRealtime() - spinStart
+
+            android.util.Log.d(
+                "ScreenRouletteSpin",
+                "SPIN_PERFORMANCE " +
+                    "category=$selectedCategory " +
+                    "durationMs=$spinDuration " +
+                    "results=${recommendations.size} " +
+                    "historyRetry=$spinRetried " +
+                    "success=${error == null}"
+            )
+
             loading = false
             onInitialLoadFinished()
         }
@@ -2051,6 +2059,7 @@ fun ScreenRouletteScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
                                     .clickable(
                                         enabled = selectedCategory !=
                                             ContentCategory.DOCUMENTARIES
@@ -2115,37 +2124,39 @@ fun ScreenRouletteScreen(
                             )
 
                             Row(
-                                verticalAlignment =
-                                    Alignment.CenterVertically
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .selectable(
+                                        selected = !matchAll,
+                                        onClick = { matchAll = false },
+                                        role = androidx.compose.ui.semantics.Role.RadioButton
+                                    ),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
                                 RadioButton(
                                     selected = !matchAll,
-                                    onClick = { matchAll = false }
+                                    onClick = null
                                 )
-
-                                Text(
-                                    "Match Any",
-                                    modifier = Modifier.clickable {
-                                        matchAll = false
-                                    }
-                                )
+                                Text("Match Any")
                             }
 
                             Row(
-                                verticalAlignment =
-                                    Alignment.CenterVertically
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .selectable(
+                                        selected = matchAll,
+                                        onClick = { matchAll = true },
+                                        role = androidx.compose.ui.semantics.Role.RadioButton
+                                    ),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
                                 RadioButton(
                                     selected = matchAll,
-                                    onClick = { matchAll = true }
+                                    onClick = null
                                 )
-
-                                Text(
-                                    "Match All",
-                                    modifier = Modifier.clickable {
-                                        matchAll = true
-                                    }
-                                )
+                                Text("Match All")
                             }
                         }
 
@@ -2488,7 +2499,12 @@ fun ScreenRouletteScreen(
                         Arrangement.spacedBy(12.dp)
                 ) {
                     Button(
+                        // SCREENROULETTE_ACCESSIBILITY_STEP25
                         onClick = { rollNumber++ },
+                        modifier = Modifier.semantics {
+                            contentDescription =
+                                "Spin for new recommendations"
+                        },
                         enabled = !loading,
                         shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
                         colors = androidx.compose.material3.ButtonDefaults.buttonColors(
@@ -2499,7 +2515,13 @@ fun ScreenRouletteScreen(
                         Text("SPIN")
                     }
 
-                    Text("${recommendations.size} films")
+                    Text(
+                        text = "${recommendations.size} films",
+                        modifier = Modifier.semantics {
+                            liveRegion =
+                                androidx.compose.ui.semantics.LiveRegionMode.Polite
+                        }
+                    )
                 }
 
                 Spacer(Modifier.height(12.dp))
@@ -2512,6 +2534,10 @@ fun ScreenRouletteScreen(
                 error?.let {
                     Text(
                         it,
+                        modifier = Modifier.semantics {
+                            liveRegion =
+                                androidx.compose.ui.semantics.LiveRegionMode.Assertive
+                        },
                         color = MaterialTheme.colorScheme.error
                     )
 
