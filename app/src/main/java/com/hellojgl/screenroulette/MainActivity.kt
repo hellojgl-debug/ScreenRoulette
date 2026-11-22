@@ -2,28 +2,33 @@ package com.hellojgl.screenroulette
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.hellojgl.screenroulette.ui.theme.ScreenRouletteTheme
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONObject
+import java.util.Calendar
 import java.util.Locale
 
 data class Movie(
@@ -32,13 +37,52 @@ data class Movie(
     val year: String,
     val rating: String,
     val overview: String,
-    val posterPath: String?
+    val posterPath: String?,
+    val genreIds: Set<Int>
 )
 
 data class ImdbInfo(
     val imdbRating: String = "N/A",
     val rottenTomatoes: String = "N/A"
 )
+
+data class MovieGenre(
+    val id: Int,
+    val name: String
+)
+
+data class MovieFilters(
+    val genreIds: Set<Int>,
+    val matchAll: Boolean,
+    val startYear: Int,
+    val endYear: Int
+)
+
+private val movieGenres = listOf(
+    MovieGenre(28, "Action"),
+    MovieGenre(12, "Adventure"),
+    MovieGenre(16, "Animation"),
+    MovieGenre(35, "Comedy"),
+    MovieGenre(80, "Crime"),
+    MovieGenre(99, "Documentary"),
+    MovieGenre(18, "Drama"),
+    MovieGenre(10751, "Family"),
+    MovieGenre(14, "Fantasy"),
+    MovieGenre(36, "History"),
+    MovieGenre(27, "Horror"),
+    MovieGenre(10402, "Music"),
+    MovieGenre(9648, "Mystery"),
+    MovieGenre(10749, "Romance"),
+    MovieGenre(878, "Science Fiction"),
+    MovieGenre(10770, "TV Movie"),
+    MovieGenre(53, "Thriller"),
+    MovieGenre(10752, "War"),
+    MovieGenre(37, "Western")
+)
+
+private val genreNames = movieGenres.associate {
+    it.id to it.name
+}
 
 private val httpClient = OkHttpClient()
 
@@ -47,30 +91,73 @@ private fun posterUrl(path: String?): String? {
     return "https://image.tmdb.org/t/p/w500$path"
 }
 
-private suspend fun tmdbRequest(path: String): JSONObject =
-    withContext(Dispatchers.IO) {
-        val token = BuildConfig.TMDB_API_KEY
+private fun genreLabel(movie: Movie): String {
+    val names = movie.genreIds
+        .mapNotNull { genreNames[it] }
+        .sorted()
 
-        require(token.isNotBlank()) {
-            "TMDB token is missing."
-        }
-
-        val request = Request.Builder()
-            .url("https://api.themoviedb.org/3/$path")
-            .header("Authorization", "Bearer $token")
-            .build()
-
-        httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw Exception("TMDB HTTP ${response.code}")
-            }
-
-            val body = response.body?.string()
-                ?: throw Exception("Empty TMDB response")
-
-            JSONObject(body)
-        }
+    return if (names.isEmpty()) {
+        "Genres unavailable"
+    } else {
+        names.joinToString(", ")
     }
+}
+
+private fun activeFilterLabel(filters: MovieFilters): String {
+    val genres = if (filters.genreIds.isEmpty()) {
+        "All genres"
+    } else {
+        filters.genreIds
+            .mapNotNull { genreNames[it] }
+            .sorted()
+            .joinToString(", ")
+    }
+
+    val matching = if (filters.matchAll) {
+        "Match All"
+    } else {
+        "Match Any"
+    }
+
+    return "$genres | $matching | " +
+            "${filters.startYear}-${filters.endYear}"
+}
+
+private suspend fun tmdbRequest(
+    path: String,
+    parameters: Map<String, String> = emptyMap()
+): JSONObject = withContext(Dispatchers.IO) {
+    val token = BuildConfig.TMDB_API_KEY
+
+    require(token.isNotBlank()) {
+        "TMDB token is missing from local.properties"
+    }
+
+    val urlBuilder =
+        "https://api.themoviedb.org/3/$path"
+            .toHttpUrl()
+            .newBuilder()
+
+    parameters.forEach { (key, value) ->
+        urlBuilder.addQueryParameter(key, value)
+    }
+
+    val request = Request.Builder()
+        .url(urlBuilder.build())
+        .header("Authorization", "Bearer $token")
+        .build()
+
+    httpClient.newCall(request).execute().use { response ->
+        if (!response.isSuccessful) {
+            throw Exception("TMDB HTTP ${response.code}")
+        }
+
+        val body = response.body?.string()
+            ?: throw Exception("Empty TMDB response")
+
+        JSONObject(body)
+    }
+}
 
 private fun parseMovies(json: JSONObject): List<Movie> {
     val results = json.getJSONArray("results")
@@ -93,6 +180,15 @@ private fun parseMovies(json: JSONObject): List<Movie> {
                 )
             }
 
+            val genres = mutableSetOf<Int>()
+            val genreArray = item.optJSONArray("genre_ids")
+
+            if (genreArray != null) {
+                for (j in 0 until genreArray.length()) {
+                    genres.add(genreArray.getInt(j))
+                }
+            }
+
             add(
                 Movie(
                     id = item.getInt("id"),
@@ -101,36 +197,116 @@ private fun parseMovies(json: JSONObject): List<Movie> {
                     rating = rating,
                     overview = item.optString("overview", ""),
                     posterPath = item.optString("poster_path")
-                        .takeIf { it.isNotBlank() && it != "null" }
+                        .takeIf {
+                            it.isNotBlank() && it != "null"
+                        },
+                    genreIds = genres
                 )
             )
         }
     }
 }
 
-private suspend fun fetchRecommendations(
-    excludedIds: Set<Int>
-): List<Movie> {
-    val candidates = mutableListOf<Movie>()
+private fun movieMatchesFilters(
+    movie: Movie,
+    filters: MovieFilters
+): Boolean {
+    val year = movie.year.toIntOrNull() ?: return false
 
-    for (page in (1..20).shuffled().take(5)) {
+    if (year !in filters.startYear..filters.endYear) {
+        return false
+    }
+
+    if (filters.genreIds.isEmpty()) {
+        return true
+    }
+
+    return if (filters.matchAll) {
+        movie.genreIds.containsAll(filters.genreIds)
+    } else {
+        movie.genreIds.any { it in filters.genreIds }
+    }
+}
+
+private suspend fun fetchRecommendations(
+    excludedIds: Set<Int>,
+    filters: MovieFilters
+): List<Movie> {
+    val parameters = mutableMapOf(
+        "language" to "en-US",
+        "sort_by" to "popularity.desc",
+        "vote_count.gte" to "100",
+        "primary_release_date.gte" to
+                "${filters.startYear}-01-01",
+        "primary_release_date.lte" to
+                "${filters.endYear}-12-31"
+    )
+
+    if (filters.genreIds.isNotEmpty()) {
+        val separator = if (filters.matchAll) "," else "|"
+
+        parameters["with_genres"] =
+            filters.genreIds
+                .sorted()
+                .joinToString(separator)
+    }
+
+    val firstPage = tmdbRequest(
+        "discover/movie",
+        parameters + ("page" to "1")
+    )
+
+    val totalPages = firstPage
+        .optInt("total_pages", 1)
+        .coerceIn(1, 500)
+
+    val candidates = mutableListOf<Movie>()
+    val candidateIds = mutableSetOf<Int>()
+
+    fun collectValidMovies(response: JSONObject) {
+        parseMovies(response).forEach { movie ->
+            if (
+                movie.id !in excludedIds &&
+                movie.id !in candidateIds &&
+                movieMatchesFilters(movie, filters)
+            ) {
+                candidates.add(movie)
+                candidateIds.add(movie.id)
+            }
+        }
+    }
+
+    collectValidMovies(firstPage)
+
+    val randomPages = (2..totalPages)
+        .shuffled()
+        .take(24)
+
+    for (page in randomPages) {
+        if (candidates.size >= 30) {
+            break
+        }
+
         val response = tmdbRequest(
-            "discover/movie?language=en-US&page=$page" +
-                    "&sort_by=popularity.desc&vote_count.gte=100"
+            "discover/movie",
+            parameters + ("page" to page.toString())
         )
-        candidates.addAll(parseMovies(response))
+
+        collectValidMovies(response)
     }
 
     return candidates
-        .distinctBy { it.id }
-        .filter { it.id !in excludedIds }
         .shuffled()
         .take(5)
 }
 
 private suspend fun fetchSimilarMovies(movieId: Int): List<Movie> {
     val response = tmdbRequest(
-        "movie/$movieId/similar?language=en-US&page=1"
+        "movie/$movieId/similar",
+        mapOf(
+            "language" to "en-US",
+            "page" to "1"
+        )
     )
 
     return parseMovies(response)
@@ -157,7 +333,8 @@ private suspend fun fetchImdbInfo(movieId: Int): ImdbInfo =
             return@withContext ImdbInfo()
         }
 
-        val url = "https://www.omdbapi.com/".toHttpUrl()
+        val url = "https://www.omdbapi.com/"
+            .toHttpUrl()
             .newBuilder()
             .addQueryParameter("apikey", omdbKey)
             .addQueryParameter("i", imdbId)
@@ -184,8 +361,9 @@ private suspend fun fetchImdbInfo(movieId: Int): ImdbInfo =
             }
 
             val imdb = json.optString("imdbRating")
-                .takeUnless { it.isBlank() || it == "N/A" }
-                ?: "N/A"
+                .takeUnless {
+                    it.isBlank() || it == "N/A"
+                } ?: "N/A"
 
             var rotten = "N/A"
 
@@ -195,8 +373,14 @@ private suspend fun fetchImdbInfo(movieId: Int): ImdbInfo =
                 for (i in 0 until ratings.length()) {
                     val item = ratings.getJSONObject(i)
 
-                    if (item.optString("Source") == "Rotten Tomatoes") {
-                        rotten = item.optString("Value", "N/A")
+                    if (
+                        item.optString("Source") ==
+                        "Rotten Tomatoes"
+                    ) {
+                        rotten = item.optString(
+                            "Value",
+                            "N/A"
+                        )
                         break
                     }
                 }
@@ -224,6 +408,43 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ScreenRouletteScreen() {
+    val currentYear = remember {
+        Calendar.getInstance().get(Calendar.YEAR)
+    }
+
+    val defaultFilters = remember {
+        MovieFilters(
+            genreIds = emptySet(),
+            matchAll = false,
+            startYear = 1990,
+            endYear = currentYear
+        )
+    }
+
+    var activeFilters by remember {
+        mutableStateOf(defaultFilters)
+    }
+
+    var selectedGenres by remember {
+        mutableStateOf(emptySet<Int>())
+    }
+
+    var matchAll by remember {
+        mutableStateOf(false)
+    }
+
+    var startYearText by remember {
+        mutableStateOf("1990")
+    }
+
+    var endYearText by remember {
+        mutableStateOf(currentYear.toString())
+    }
+
+    var filtersExpanded by remember {
+        mutableStateOf(false)
+    }
+
     var recommendations by remember {
         mutableStateOf<List<Movie>>(emptyList())
     }
@@ -244,16 +465,19 @@ fun ScreenRouletteScreen() {
         mutableStateOf<String?>(null)
     }
 
-    // Navigation history: each selected film is added here.
     val navigationStack = remember {
         mutableStateListOf<Movie>()
     }
 
     val selectedMovie = navigationStack.lastOrNull()
 
+    val recommendationListState = rememberLazyListState()
+
     fun goBack() {
         if (navigationStack.isNotEmpty()) {
-            navigationStack.removeAt(navigationStack.lastIndex)
+            navigationStack.removeAt(
+                navigationStack.lastIndex
+            )
         }
     }
 
@@ -261,19 +485,35 @@ fun ScreenRouletteScreen() {
         goBack()
     }
 
-    LaunchedEffect(rollNumber) {
+    // A new request is triggered whenever the active
+    // filters or roll number changes.
+    LaunchedEffect(activeFilters, rollNumber) {
         loading = true
         error = null
+        recommendations = emptyList()
 
         try {
-            val newMovies = fetchRecommendations(seenIds)
+            val newMovies = fetchRecommendations(
+                excludedIds = seenIds,
+                filters = activeFilters
+            )
 
-            if (newMovies.isEmpty()) {
-                error = "No unseen films found. Try restarting the app."
-            } else {
-                recommendations = newMovies
-                seenIds = seenIds + newMovies.map { it.id }
+            // Final verification before displaying films.
+            val verifiedMovies = newMovies.filter {
+                movieMatchesFilters(it, activeFilters)
             }
+
+            if (verifiedMovies.isEmpty()) {
+                error =
+                    "No matching films found. " +
+                            "Try broader filters."
+            } else {
+                recommendations = verifiedMovies
+                seenIds = seenIds +
+                        verifiedMovies.map { it.id }
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             error = e.message ?: "Unable to load films"
         } finally {
@@ -293,24 +533,260 @@ fun ScreenRouletteScreen() {
                     .padding(16.dp)
             ) {
                 Text(
-                    text = "ScreenRoulette",
+                    "ScreenRoulette",
                     style = MaterialTheme.typography.headlineLarge
                 )
 
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(6.dp))
 
                 Text("Five films. One decision.")
 
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(12.dp))
 
-                Button(
-                    onClick = { rollNumber++ },
-                    enabled = !loading
+                Text(
+                    "Active Filters",
+                    style = MaterialTheme.typography.titleSmall
+                )
+
+                Text(
+                    activeFilterLabel(activeFilters),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                Spacer(Modifier.height(12.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        filtersExpanded = !filtersExpanded
+                    },
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Roll Again")
+                    Text(
+                        if (filtersExpanded) {
+                            "Hide Filters"
+                        } else {
+                            "Show Filters"
+                        }
+                    )
                 }
 
-                Spacer(Modifier.height(16.dp))
+                if (filtersExpanded) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false),
+                        verticalArrangement =
+                            Arrangement.spacedBy(8.dp)
+                    ) {
+                        item {
+                            Text(
+                                "Genres",
+                                style = MaterialTheme
+                                    .typography.titleLarge
+                            )
+
+                            Text(
+                                "Select one or more genres."
+                            )
+                        }
+
+                        items(movieGenres) { genre ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selectedGenres =
+                                            if (
+                                                genre.id in selectedGenres
+                                            ) {
+                                                selectedGenres - genre.id
+                                            } else {
+                                                selectedGenres + genre.id
+                                            }
+                                    },
+                                verticalAlignment =
+                                    Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked =
+                                        genre.id in selectedGenres,
+                                    onCheckedChange = { checked ->
+                                        selectedGenres =
+                                            if (checked) {
+                                                selectedGenres + genre.id
+                                            } else {
+                                                selectedGenres - genre.id
+                                            }
+                                    }
+                                )
+
+                                Text(genre.name)
+                            }
+                        }
+
+                        item {
+                            Text(
+                                "Genre matching",
+                                style = MaterialTheme
+                                    .typography.titleMedium
+                            )
+
+                            Row(
+                                verticalAlignment =
+                                    Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = !matchAll,
+                                    onClick = { matchAll = false }
+                                )
+
+                                Text(
+                                    "Match Any",
+                                    modifier = Modifier.clickable {
+                                        matchAll = false
+                                    }
+                                )
+                            }
+
+                            Row(
+                                verticalAlignment =
+                                    Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = matchAll,
+                                    onClick = { matchAll = true }
+                                )
+
+                                Text(
+                                    "Match All",
+                                    modifier = Modifier.clickable {
+                                        matchAll = true
+                                    }
+                                )
+                            }
+                        }
+
+                        item {
+                            Text(
+                                "Release years",
+                                style = MaterialTheme
+                                    .typography.titleMedium
+                            )
+
+                            Row(
+                                horizontalArrangement =
+                                    Arrangement.spacedBy(12.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = startYearText,
+                                    onValueChange = {
+                                        startYearText =
+                                            it.filter { char ->
+                                                char.isDigit()
+                                            }.take(4)
+                                    },
+                                    label = { Text("From") },
+                                    keyboardOptions =
+                                        KeyboardOptions(
+                                            keyboardType =
+                                                KeyboardType.Number
+                                        ),
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+
+                                OutlinedTextField(
+                                    value = endYearText,
+                                    onValueChange = {
+                                        endYearText =
+                                            it.filter { char ->
+                                                char.isDigit()
+                                            }.take(4)
+                                    },
+                                    label = { Text("To") },
+                                    keyboardOptions =
+                                        KeyboardOptions(
+                                            keyboardType =
+                                                KeyboardType.Number
+                                        ),
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+
+                        item {
+                            Spacer(Modifier.height(8.dp))
+
+                            Button(
+                                onClick = {
+                                    val from =
+                                        startYearText.toIntOrNull()
+
+                                    val to =
+                                        endYearText.toIntOrNull()
+
+                                    if (
+                                        from == null ||
+                                        to == null ||
+                                        from < 1874 ||
+                                        to > currentYear ||
+                                        from > to
+                                    ) {
+                                        error =
+                                            "Enter a valid year range " +
+                                                    "between 1874 and $currentYear."
+                                    } else {
+                                        val newFilters = MovieFilters(
+                                            genreIds =
+                                                selectedGenres.toSet(),
+                                            matchAll = matchAll,
+                                            startYear = from,
+                                            endYear = to
+                                        )
+
+                                        // Clear the previous session
+                                        // before applying new filters.
+                                        seenIds = emptySet()
+                                        recommendations = emptyList()
+
+                                        filtersExpanded = false
+
+                                        if (newFilters == activeFilters) {
+                                            rollNumber++
+                                        } else {
+                                            activeFilters = newFilters
+                                        }
+                                    }
+                                },
+                                enabled = !loading,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Apply Filters")
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement =
+                        Arrangement.spacedBy(12.dp)
+                ) {
+                    Button(
+                        onClick = { rollNumber++ },
+                        enabled = !loading
+                    ) {
+                        Text("Roll Again")
+                    }
+
+                    Text("${recommendations.size} films")
+                }
+
+                Spacer(Modifier.height(12.dp))
 
                 if (loading) {
                     CircularProgressIndicator()
@@ -319,21 +795,26 @@ fun ScreenRouletteScreen() {
 
                 error?.let {
                     Text(
-                        text = it,
+                        it,
                         color = MaterialTheme.colorScheme.error
                     )
+
                     Spacer(Modifier.height(12.dp))
                 }
 
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    items(
-                        recommendations,
-                        key = { it.id }
-                    ) { movie ->
-                        MovieCard(movie) {
-                            navigationStack.add(movie)
+                if (!filtersExpanded) {
+                    LazyColumn(
+                        state = recommendationListState,
+                        verticalArrangement =
+                            Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(
+                            recommendations,
+                            key = { it.id }
+                        ) { movie ->
+                            MovieCard(movie) {
+                                navigationStack.add(movie)
+                            }
                         }
                     }
                 }
@@ -343,8 +824,8 @@ fun ScreenRouletteScreen() {
                 movie = selectedMovie,
                 padding = innerPadding,
                 onBack = { goBack() },
-                onMovieSelected = { movie ->
-                    navigationStack.add(movie)
+                onMovieSelected = {
+                    navigationStack.add(it)
                 }
             )
         }
@@ -395,7 +876,8 @@ private fun MovieCard(
     ) {
         Row(
             modifier = Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
+            horizontalArrangement =
+                Arrangement.spacedBy(14.dp)
         ) {
             MoviePoster(
                 movie = movie,
@@ -406,10 +888,11 @@ private fun MovieCard(
 
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement =
+                    Arrangement.spacedBy(6.dp)
             ) {
                 Text(
-                    text = movie.title,
+                    movie.title,
                     style = MaterialTheme.typography.titleMedium
                 )
 
@@ -418,7 +901,12 @@ private fun MovieCard(
                 Text("TMDB: ${movie.rating}/10")
 
                 Text(
-                    text = "Tap for details",
+                    "Genres: ${genreLabel(movie)}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                Text(
+                    "Tap for details",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -464,8 +952,11 @@ private fun MovieDetailsScreen(
 
         try {
             similarMovies = fetchSimilarMovies(movie.id)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            similarError = e.message ?: "Unable to load similar films"
+            similarError =
+                e.message ?: "Unable to load similar films"
         } finally {
             similarLoading = false
         }
@@ -477,8 +968,11 @@ private fun MovieDetailsScreen(
 
         try {
             imdbInfo = fetchImdbInfo(movie.id)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            ratingsError = e.message ?: "Unable to load ratings"
+            ratingsError =
+                e.message ?: "Unable to load ratings"
         } finally {
             ratingsLoading = false
         }
@@ -503,7 +997,8 @@ private fun MovieDetailsScreen(
                 end = 16.dp,
                 bottom = 24.dp
             ),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement =
+                Arrangement.spacedBy(14.dp)
         ) {
             item {
                 Text(
@@ -523,22 +1018,32 @@ private fun MovieDetailsScreen(
 
             item {
                 Text(
-                    "${movie.year}  •  TMDB ${movie.rating}/10"
+                    "${movie.year} • TMDB ${movie.rating}/10"
+                )
+
+                Text(
+                    "Genres: ${genreLabel(movie)}"
                 )
             }
 
             item {
                 if (ratingsLoading) {
-                    Text("Loading IMDb and Rotten Tomatoes ratings...")
+                    Text(
+                        "Loading IMDb and Rotten Tomatoes ratings..."
+                    )
                 } else {
                     Text("IMDb: ${imdbInfo.imdbRating}/10")
-                    Text("Rotten Tomatoes: ${imdbInfo.rottenTomatoes}")
+
+                    Text(
+                        "Rotten Tomatoes: " +
+                                imdbInfo.rottenTomatoes
+                    )
 
                     ratingsError?.let {
                         Text(
                             "Ratings unavailable: $it",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
+                            color = MaterialTheme
+                                .colorScheme.error
                         )
                     }
                 }
@@ -560,8 +1065,6 @@ private fun MovieDetailsScreen(
             }
 
             item {
-                Spacer(Modifier.height(8.dp))
-
                 Text(
                     "You Might Also Like",
                     style = MaterialTheme.typography.titleLarge
