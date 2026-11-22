@@ -1,6 +1,9 @@
 package com.hellojgl.screenroulette
 
 import android.os.Bundle
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.drawscope.rotate
+import kotlinx.coroutines.launch
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -36,6 +39,8 @@ import coil3.compose.AsyncImage
 import com.hellojgl.screenroulette.ui.theme.ScreenRouletteTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -180,6 +185,24 @@ private val genreNames = movieGenres.associate {
 }
 
 private val httpClient = OkHttpClient()
+
+// Performance optimisation 2: TMDB response cache
+private data class CachedTmdbResponse(
+    val json: String,
+    val savedAt: Long
+)
+
+private val tmdbCache =
+    java.util.concurrent.ConcurrentHashMap<String, CachedTmdbResponse>()
+
+private const val TMDB_CACHE_DURATION_MS = 10 * 60 * 1000L
+
+private fun shouldCacheTmdb(path: String): Boolean {
+    return path.startsWith("watch/providers/") ||
+        path.endsWith("/watch/providers") ||
+        path.endsWith("/similar") ||
+        path.endsWith("/external_ids")
+}
 
 
 private fun saveCategoryFilters(
@@ -405,8 +428,23 @@ private suspend fun tmdbRequest(
         urlBuilder.addQueryParameter(key, value)
     }
 
+    val url = urlBuilder.build()
+    val cacheKey = url.toString()
+    val cacheEnabled = shouldCacheTmdb(path)
+
+    if (cacheEnabled) {
+        val cached = tmdbCache[cacheKey]
+        if (
+            cached != null &&
+            android.os.SystemClock.elapsedRealtime() -
+                cached.savedAt < TMDB_CACHE_DURATION_MS
+        ) {
+            return@withContext JSONObject(cached.json)
+        }
+    }
+
     val request = Request.Builder()
-        .url(urlBuilder.build())
+        .url(url)
         .header("Authorization", "Bearer $token")
         .build()
 
@@ -418,7 +456,20 @@ private suspend fun tmdbRequest(
         val body = response.body?.string()
             ?: throw Exception("Empty TMDB response")
 
-        JSONObject(body)
+        val parsed = JSONObject(body)
+
+        if (cacheEnabled) {
+            if (tmdbCache.size >= 150) {
+                tmdbCache.clear()
+            }
+
+            tmdbCache[cacheKey] = CachedTmdbResponse(
+                json = body,
+                savedAt = android.os.SystemClock.elapsedRealtime()
+            )
+        }
+
+        parsed
     }
 }
 
@@ -654,15 +705,26 @@ private suspend fun fetchCategoryRecommendations(
 
     collect(first)
 
-    for (page in (2..totalPages).shuffled().take(24)) {
+    // Performance optimisation: concurrent discovery
+    val remainingPages = (2..totalPages).shuffled().take(24)
+
+    for (batch in remainingPages.chunked(4)) {
         if (candidates.size >= 30) break
 
-        collect(
-            tmdbRequest(
-                endpoint,
-                parameters + ("page" to page.toString())
-            )
-        )
+        kotlinx.coroutines.coroutineScope {
+            batch.map { page ->
+                async {
+                    runCatching {
+                        tmdbRequest(
+                            endpoint,
+                            parameters + ("page" to page.toString())
+                        )
+                    }.getOrNull()
+                }
+            }.awaitAll().filterNotNull().forEach { response ->
+                collect(response)
+            }
+        }
     }
 
     return candidates.shuffled().take(5)
@@ -907,30 +969,55 @@ enum class AppearanceMode {
 }
 
 
+
 // ScreenRoulette animated splash screen
+// Realistic roulette animation v2
 @Composable
 private fun RouletteSplashScreen() {
-    val rotation = rememberInfiniteTransition(
-        label = "rouletteRotation"
-    )
+    val wheel = remember { Animatable(0f) }
+    val ball = remember { Animatable(0f) }
 
-    val angle by rotation.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(
-                durationMillis = 2200,
-                easing = LinearEasing
-            ),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "wheelAngle"
-    )
+    LaunchedEffect(Unit) {
+        launch {
+            wheel.animateTo(
+                targetValue = 1080f + 127f,
+                animationSpec = tween(
+                    durationMillis = 3700,
+                    easing = FastOutSlowInEasing
+                )
+            )
+        }
+        launch {
+            ball.animateTo(
+                targetValue = -1800f - 127f,
+                animationSpec = tween(
+                    durationMillis = 3900,
+                    easing = FastOutSlowInEasing
+                )
+            )
+        }
+    }
 
     val green = Color(0xFF073D2B)
     val gold = Color(0xFFD6B66A)
     val red = Color(0xFFB71C1C)
     val black = Color(0xFF171717)
+
+    val numbers = remember {
+        listOf(
+            0, 32, 15, 19, 4, 21, 2, 25, 17, 34,
+            6, 27, 13, 36, 11, 30, 8, 23, 10, 5,
+            24, 16, 33, 1, 20, 14, 31, 9, 22, 18,
+            29, 7, 28, 12, 35, 3, 26
+        )
+    }
+
+    val redNumbers = remember {
+        setOf(
+            1, 3, 5, 7, 9, 12, 14, 16, 18,
+            19, 21, 23, 25, 27, 30, 32, 34, 36
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -949,80 +1036,158 @@ private fun RouletteSplashScreen() {
         Spacer(Modifier.height(34.dp))
 
         Box(
-            modifier = Modifier.size(280.dp),
+            modifier = Modifier.size(300.dp),
             contentAlignment = Alignment.Center
         ) {
-            Canvas(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer(rotationZ = angle)
-            ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
                 val radius = size.minDimension / 2f
-                val centre = Offset(
-                    size.width / 2f,
-                    size.height / 2f
-                )
+                val cx = size.width / 2f
+                val cy = size.height / 2f
+                val sweep = 360f / numbers.size
 
                 drawCircle(
                     color = gold,
                     radius = radius
                 )
+
+                drawCircle(
+                    color = Color(0xFF33210F),
+                    radius = radius * 0.965f
+                )
+
+                drawCircle(
+                    color = gold,
+                    radius = radius * 0.92f
+                )
+
                 drawCircle(
                     color = black,
-                    radius = radius * 0.95f
+                    radius = radius * 0.895f
                 )
 
-                val numbers = 37
-                val sweep = 360f / numbers
+                // Rotate numbered wheel clockwise.
+                rotate(
+                    degrees = wheel.value,
+                    pivot = Offset(cx, cy)
+                ) {
+                    for (i in numbers.indices) {
+                        val number = numbers[i]
 
-                for (i in 0 until numbers) {
-                    val colour = when {
-                        i == 0 -> Color(0xFF138447)
-                        i % 2 == 0 -> red
-                        else -> black
+                        val colour = when {
+                            number == 0 -> Color(0xFF138447)
+                            number in redNumbers -> red
+                            else -> black
+                        }
+
+                        drawArc(
+                            color = colour,
+                            startAngle = -90f +
+                                i * sweep - sweep / 2f,
+                            sweepAngle = sweep,
+                            useCenter = true,
+                            topLeft = Offset(
+                                cx - radius * 0.86f,
+                                cy - radius * 0.86f
+                            ),
+                            size = androidx.compose.ui.geometry.Size(
+                                radius * 1.72f,
+                                radius * 1.72f
+                            )
+                        )
                     }
 
-                    drawArc(
-                        color = colour,
-                        startAngle = -90f + i * sweep,
-                        sweepAngle = sweep,
-                        useCenter = true,
-                        topLeft = Offset(
-                            centre.x - radius * 0.88f,
-                            centre.y - radius * 0.88f
-                        ),
-                        size = androidx.compose.ui.geometry.Size(
-                            radius * 1.76f,
-                            radius * 1.76f
-                        )
+                    drawCircle(
+                        color = gold,
+                        radius = radius * 0.63f
                     )
+
+                    drawCircle(
+                        color = Color(0xFF56371A),
+                        radius = radius * 0.605f
+                    )
+
+                    drawCircle(
+                        color = gold,
+                        radius = radius * 0.20f
+                    )
+
+                    drawCircle(
+                        color = Color(0xFFFFE7A5),
+                        radius = radius * 0.085f
+                    )
+
+                    // Draw the real European pocket numbers.
+                    drawContext.canvas.nativeCanvas.apply {
+                        val paint = android.graphics.Paint(
+                            android.graphics.Paint.ANTI_ALIAS_FLAG
+                        ).apply {
+                            color = android.graphics.Color.WHITE
+                            textAlign =
+                                android.graphics.Paint.Align.CENTER
+                            textSize = radius * 0.095f
+                            typeface = android.graphics.Typeface
+                                .create(
+                                    android.graphics.Typeface.DEFAULT,
+                                    android.graphics.Typeface.BOLD
+                                )
+                        }
+
+                        for (i in numbers.indices) {
+                            val theta = Math.toRadians(
+                                (-90.0 + i * sweep)
+                            )
+                            val textRadius = radius * 0.755f
+                            val x = cx +
+                                kotlin.math.cos(theta).toFloat() *
+                                textRadius
+                            val y = cy +
+                                kotlin.math.sin(theta).toFloat() *
+                                textRadius
+
+                            drawText(
+                                numbers[i].toString(),
+                                x,
+                                y - (paint.ascent() +
+                                    paint.descent()) / 2f,
+                                paint
+                            )
+                        }
+                    }
                 }
 
-                drawCircle(
-                    color = gold,
-                    radius = radius * 0.58f
+                // Ball travels anticlockwise independently.
+                val ballAngle = Math.toRadians(
+                    (-90.0 + ball.value)
                 )
-                drawCircle(
-                    color = Color(0xFF56371A),
-                    radius = radius * 0.54f
-                )
-                drawCircle(
-                    color = gold,
-                    radius = radius * 0.17f
-                )
-                drawCircle(
-                    color = Color(0xFFFFE7A5),
-                    radius = radius * 0.07f
-                )
-            }
+                val ballRadius = radius * 0.93f
+                val ballX = cx +
+                    kotlin.math.cos(ballAngle).toFloat() *
+                    ballRadius
+                val ballY = cy +
+                    kotlin.math.sin(ballAngle).toFloat() *
+                    ballRadius
 
-            Canvas(modifier = Modifier.fillMaxSize()) {
+                drawCircle(
+                    color = Color(0xFF444444),
+                    radius = 10.dp.toPx(),
+                    center = Offset(
+                        ballX + 2.dp.toPx(),
+                        ballY + 2.dp.toPx()
+                    )
+                )
+
                 drawCircle(
                     color = Color.White,
-                    radius = 9.dp.toPx(),
+                    radius = 8.dp.toPx(),
+                    center = Offset(ballX, ballY)
+                )
+
+                drawCircle(
+                    color = Color(0xFFE6E6E6),
+                    radius = 3.dp.toPx(),
                     center = Offset(
-                        size.width / 2f,
-                        size.height * 0.065f
+                        ballX - 2.dp.toPx(),
+                        ballY - 2.dp.toPx()
                     )
                 )
             }
@@ -1083,7 +1248,7 @@ class MainActivity : ComponentActivity() {
             }
 
             LaunchedEffect(Unit) {
-                delay(2500)
+                delay(1500)
                 showSplash = false
             }
 
