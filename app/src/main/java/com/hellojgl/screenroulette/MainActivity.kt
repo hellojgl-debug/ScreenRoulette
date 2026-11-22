@@ -1,11 +1,16 @@
 package com.hellojgl.screenroulette
 
+import android.os.Build
 import android.os.Bundle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.drawscope.rotate
 import kotlinx.coroutines.launch
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
@@ -15,7 +20,6 @@ import androidx.compose.ui.geometry.Offset
 import kotlinx.coroutines.delay
 
 import android.content.Context
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -27,13 +31,19 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -43,11 +53,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.first
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import org.json.JSONArray
+import java.time.LocalDate
 import java.util.Calendar
 import java.util.Locale
 import androidx.compose.ui.semantics.contentDescription
@@ -132,7 +145,8 @@ data class Movie(
     val overview: String,
     val posterPath: String?,
     val genreIds: Set<Int>,
-    val originalLanguage: String = ""
+    val originalLanguage: String = "",
+    val releaseDate: String = ""
 )
 
 // Step 46: Persistent Watchlist
@@ -232,6 +246,10 @@ data class MovieFilters(
     val streamingProviderId: Int = 0
 )
 
+private const val DYSTOPIAN_GENRE_ID = -1
+private const val DYSTOPIA_TMDB_KEYWORD_ID = "4565"
+private const val RECOMMENDATION_COUNT = 5
+
 private val movieGenres = listOf(
     MovieGenre(28, "Action"),
     MovieGenre(12, "Adventure"),
@@ -240,6 +258,7 @@ private val movieGenres = listOf(
     MovieGenre(80, "Crime"),
     MovieGenre(99, "Documentary"),
     MovieGenre(18, "Drama"),
+    MovieGenre(DYSTOPIAN_GENRE_ID, "Dystopian"),
     MovieGenre(10751, "Family"),
     MovieGenre(14, "Fantasy"),
     MovieGenre(36, "History"),
@@ -269,6 +288,8 @@ private data class CachedTmdbResponse(
 
 private val tmdbCache =
     java.util.concurrent.ConcurrentHashMap<String, CachedTmdbResponse>()
+
+private const val EARLIEST_RELEASE_YEAR = 1870
 
 private const val TMDB_CACHE_DURATION_MS = 10 * 60 * 1000L
 
@@ -329,7 +350,7 @@ private fun loadCategoryFilters(
         val to = data.optInt("endYear", fallback.endYear)
 
         require(
-            from >= 1874 &&
+            from >= EARLIEST_RELEASE_YEAR &&
             from <= to &&
             to <= Calendar.getInstance().get(Calendar.YEAR)
         )
@@ -493,14 +514,8 @@ private suspend fun tmdbRequest(
     path: String,
     parameters: Map<String, String> = emptyMap()
 ): JSONObject = withContext(Dispatchers.IO) {
-    val token = BuildConfig.TMDB_API_KEY
-
-    require(token.isNotBlank()) {
-        "TMDB token is missing from local.properties"
-    }
-
     val urlBuilder =
-        "https://api.themoviedb.org/3/$path"
+        "${BuildConfig.BACKEND_BASE_URL}/api/tmdb/$path"
             .toHttpUrl()
             .newBuilder()
 
@@ -525,7 +540,6 @@ private suspend fun tmdbRequest(
 
     val request = Request.Builder()
         .url(url)
-        .header("Authorization", "Bearer $token")
         .build()
 
     httpClient.newCall(request).execute().use { response ->
@@ -553,12 +567,16 @@ private suspend fun tmdbRequest(
     }
 }
 
+private fun JSONObject.tmdbPosterPath(): String? =
+    optString("poster_path").takeIf { it.startsWith('/') && it.length > 1 }
+
 private fun parseMovies(json: JSONObject): List<Movie> {
     val results = json.getJSONArray("results")
 
     return buildList {
         for (i in 0 until results.length()) {
             val item = results.getJSONObject(i)
+            val posterPath = item.tmdbPosterPath() ?: continue
             val date = item.optString("release_date")
 
             val rating = if (
@@ -590,13 +608,11 @@ private fun parseMovies(json: JSONObject): List<Movie> {
                     year = date.take(4).ifBlank { "N/A" },
                     rating = rating,
                     overview = item.optString("overview", ""),
-                    posterPath = item.optString("poster_path")
-                        .takeIf {
-                            it.isNotBlank() && it != "null"
-                        },
+                    posterPath = posterPath,
                     genreIds = genres,
                     originalLanguage =
-                        item.optString("original_language", "")
+                        item.optString("original_language", ""),
+                    releaseDate = date
                 )
             )
         }
@@ -611,6 +627,7 @@ private val tvGenreNames = mapOf(
     80 to "Crime",
     99 to "Documentary",
     18 to "Drama",
+    DYSTOPIAN_GENRE_ID to "Dystopian",
     10751 to "Family",
     10762 to "Kids",
     9648 to "Mystery",
@@ -636,6 +653,7 @@ private fun parseTitles(
     return buildList {
         for (i in 0 until results.length()) {
             val item = results.getJSONObject(i)
+            val posterPath = item.tmdbPosterPath() ?: continue
             val date = item.optString("first_air_date")
             val genres = mutableSetOf<Int>()
             val array = item.optJSONArray("genre_ids")
@@ -664,11 +682,11 @@ private fun parseTitles(
                     year = date.take(4).ifBlank { "N/A" },
                     rating = rating,
                     overview = item.optString("overview", ""),
-                    posterPath = item.optString("poster_path")
-                        .takeIf { it.isNotBlank() && it != "null" },
+                    posterPath = posterPath,
                     genreIds = genres,
                     originalLanguage =
-                        item.optString("original_language", "")
+                        item.optString("original_language", ""),
+                    releaseDate = date
                 )
             )
         }
@@ -695,7 +713,43 @@ private fun titleGenreLabel(
 private suspend fun fetchCategoryRecommendations(
     category: ContentCategory,
     excludedIds: Set<Int>,
-    filters: MovieFilters
+    filters: MovieFilters,
+    newestFirst: Boolean
+): List<Movie> {
+    val standardGenres = filters.genreIds - DYSTOPIAN_GENRE_ID
+    val needsSeparateQueries = category != ContentCategory.DOCUMENTARIES &&
+        DYSTOPIAN_GENRE_ID in filters.genreIds && standardGenres.isNotEmpty() &&
+        !filters.matchAll
+
+    if (!needsSeparateQueries) {
+        return fetchDiscoveryRecommendations(category, excludedIds, filters, newestFirst)
+    }
+
+    // TMDB combines genre and keyword parameters with AND. Query both sides for Match Any.
+    val candidates = kotlinx.coroutines.coroutineScope {
+        listOf(standardGenres, setOf(DYSTOPIAN_GENRE_ID)).map { genres ->
+            async {
+                fetchDiscoveryRecommendations(
+                    category, excludedIds, filters.copy(genreIds = genres), newestFirst,
+                    extraPageLimit = 20
+                )
+            }
+        }.awaitAll().flatten().distinctBy { it.id }
+    }
+
+    return if (newestFirst) {
+        candidates.sortedByDescending { it.releaseDate }.take(RECOMMENDATION_COUNT)
+    } else {
+        selectSpinRecommendations(candidates, excludedIds, filters)
+    }
+}
+
+private suspend fun fetchDiscoveryRecommendations(
+    category: ContentCategory,
+    excludedIds: Set<Int>,
+    filters: MovieFilters,
+    newestFirst: Boolean,
+    extraPageLimit: Int = 40
 ): List<Movie> {
     val diagnosticStart = android.os.SystemClock.elapsedRealtime()
     var diagnosticPages = 0
@@ -722,9 +776,11 @@ private suspend fun fetchCategoryRecommendations(
 
     val parameters = mutableMapOf(
         "language" to "en-US",
-        "sort_by" to "popularity.desc",
-        "vote_count.gte" to "100"
+        "sort_by" to if (newestFirst) "primary_release_date.desc" else "popularity.desc"
     )
+    if (!newestFirst) {
+        parameters["vote_count.gte"] = "100"
+    }
 
     if (filters.originalLanguageFilter == "en") {
         parameters["with_original_language"] = "en"
@@ -732,7 +788,7 @@ private suspend fun fetchCategoryRecommendations(
 
     if (filters.minRating > 0.0) {
         parameters["vote_average.gte"] =
-            filters.minRating.toString()
+            String.format(Locale.US, "%.2f", filters.minRating)
     }
 
     if (filters.streamingRegion.isNotBlank() &&
@@ -751,12 +807,18 @@ private suspend fun fetchCategoryRecommendations(
     } else {
         parameters["primary_release_date.gte"] =
             "${filters.startYear}-01-01"
+        val endDate = LocalDate.of(filters.endYear, 12, 31)
         parameters["primary_release_date.lte"] =
-            "${filters.endYear}-12-31"
+            (if (newestFirst) minOf(endDate, LocalDate.now()) else endDate).toString()
     }
 
-    if (effectiveGenres.isNotEmpty()) {
-        parameters["with_genres"] = effectiveGenres
+    val dystopian = DYSTOPIAN_GENRE_ID in effectiveGenres
+    val tmdbGenres = effectiveGenres - DYSTOPIAN_GENRE_ID
+    if (dystopian) {
+        parameters["with_keywords"] = DYSTOPIA_TMDB_KEYWORD_ID
+    }
+    if (tmdbGenres.isNotEmpty()) {
+        parameters["with_genres"] = tmdbGenres
             .sorted()
             .joinToString(
                 if (effectiveFilters.matchAll) "," else "|"
@@ -778,7 +840,12 @@ private suspend fun fetchCategoryRecommendations(
 
     fun collect(response: JSONObject) {
         diagnosticPages++
-        parseTitles(response, category).forEach { title ->
+        parseTitles(response, category).forEach { movie ->
+            val title = if (dystopian) {
+                movie.copy(genreIds = movie.genreIds + DYSTOPIAN_GENRE_ID)
+            } else {
+                movie
+            }
             diagnosticParsed++
             if (title.id in excludedIds) diagnosticExcluded++
             if (
@@ -794,12 +861,9 @@ private suspend fun fetchCategoryRecommendations(
 
     collect(first)
 
-    // Adaptive discovery: search more pages only when necessary.
-    val remainingPages = (2..totalPages).shuffled().take(40)
-
-    // Build a wider selection before choosing five titles.
-    // The existing page limit prevents unlimited searching.
-    val targetCandidateCount = 20
+    val pages = 2..totalPages
+    val remainingPages = (if (newestFirst) pages.toList() else pages.shuffled()).take(extraPageLimit)
+    val targetCandidateCount = if (newestFirst) RECOMMENDATION_COUNT else 20
 
     for (batch in remainingPages.chunked(4)) {
         if (candidates.size >= targetCandidateCount) break
@@ -856,6 +920,8 @@ private suspend fun fetchCategoryRecommendations(
         )
     }
 
+    if (newestFirst) return candidates.take(targetCandidateCount)
+
     return selectSpinRecommendations(
         candidates = candidates,
         excludedIds = emptySet(),
@@ -867,7 +933,7 @@ internal fun selectSpinRecommendations(
     candidates: List<Movie>,
     excludedIds: Set<Int>,
     filters: MovieFilters,
-    limit: Int = 5
+    limit: Int = RECOMMENDATION_COUNT
 ): List<Movie> {
     if (limit <= 0) return emptyList()
 
@@ -980,12 +1046,6 @@ private suspend fun fetchImdbInfo(
     category: ContentCategory
 ): ImdbInfo =
     withContext(Dispatchers.IO) {
-        val omdbKey = BuildConfig.OMDB_API_KEY
-
-        if (omdbKey.isBlank()) {
-            return@withContext ImdbInfo()
-        }
-
         val externalIds = tmdbRequest(
             if (category == ContentCategory.TV_SERIES) {
                 "tv/$movieId/external_ids"
@@ -1000,10 +1060,9 @@ private suspend fun fetchImdbInfo(
             return@withContext ImdbInfo()
         }
 
-        val url = "https://www.omdbapi.com/"
+        val url = "${BuildConfig.BACKEND_BASE_URL}/api/omdb"
             .toHttpUrl()
             .newBuilder()
-            .addQueryParameter("apikey", omdbKey)
             .addQueryParameter("i", imdbId)
             .build()
 
@@ -1066,20 +1125,25 @@ enum class ContentCategory {
     DOCUMENTARIES
 }
 
-enum class AppearanceMode {
-    DARK,
-    LIGHT,
-    SYSTEM
-}
+private const val SPLASH_SPIN_DURATION_MS = 1_250
+private const val SPLASH_MINIMUM_AFTER_START_MS = 1_700L
+private const val SPLASH_LOAD_TIMEOUT_MS = 5_000L
 
-
-
-// ScreenRoulette static splash screen
-// Static roulette artwork
 @Composable
-private fun RouletteSplashScreen() {
-    // Static roulette wheel, no animation.
-    val wheelAngle = 127f
+private fun RouletteSplashScreen(startSpin: Boolean, onSpinFinished: () -> Unit) {
+    val wheelAngle = remember { Animatable(127f) }
+    LaunchedEffect(startSpin) {
+        if (startSpin) {
+            wheelAngle.animateTo(
+                targetValue = 487f,
+                animationSpec = tween(
+                    durationMillis = SPLASH_SPIN_DURATION_MS,
+                    easing = FastOutSlowInEasing
+                )
+            )
+            onSpinFinished()
+        }
+    }
     val ballAngleDegrees = -127f
 
     val green = Color(0xFF073D2B)
@@ -1151,7 +1215,7 @@ private fun RouletteSplashScreen() {
 
                 // Rotate numbered wheel clockwise.
                 rotate(
-                    degrees = wheelAngle,
+                    degrees = wheelAngle.value,
                     pivot = Offset(cx, cy)
                 ) {
                     for (i in numbers.indices) {
@@ -1310,33 +1374,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val preferences = getSharedPreferences(
-            "screenroulette_settings",
-            MODE_PRIVATE
-        )
+        var platformSplashDismissed by mutableStateOf(Build.VERSION.SDK_INT < 31)
+        if (Build.VERSION.SDK_INT >= 31) {
+            splashScreen.setOnExitAnimationListener { view ->
+                view.remove()
+                platformSplashDismissed = true
+            }
+        }
 
         setContent {
-            var appearance by remember {
-                mutableStateOf(
-                    runCatching {
-                        AppearanceMode.valueOf(
-                            preferences.getString(
-                                "appearance",
-                                "SYSTEM"
-                            ) ?: "SYSTEM"
-                        )
-                    }.getOrDefault(AppearanceMode.SYSTEM)
-                )
-            }
-
-            val systemDark = isSystemInDarkTheme()
-
-            val useDarkTheme = when (appearance) {
-                AppearanceMode.DARK -> true
-                AppearanceMode.LIGHT -> false
-                AppearanceMode.SYSTEM -> systemDark
-            }
-
             var showSplash by remember {
                 mutableStateOf(true)
             }
@@ -1345,20 +1391,25 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(false)
             }
 
-            LaunchedEffect(initialRecommendationsFinished) {
-                if (initialRecommendationsFinished) {
-                    delay(1000)
-                    showSplash = false
-                }
-            }
+            var startSpin by remember { mutableStateOf(false) }
+            var spinFinished by remember { mutableStateOf(false) }
 
             LaunchedEffect(Unit) {
-                delay(5000)
+                withTimeoutOrNull(1000) {
+                    snapshotFlow { platformSplashDismissed }.first { it }
+                }
+                withFrameNanos { }
+                delay(120)
+                startSpin = true
+                withTimeoutOrNull(SPLASH_LOAD_TIMEOUT_MS) {
+                    delay(SPLASH_MINIMUM_AFTER_START_MS)
+                    snapshotFlow { spinFinished && initialRecommendationsFinished }.first { it }
+                }
                 showSplash = false
             }
 
             ScreenRouletteTheme(
-                darkTheme = useDarkTheme,
+                darkTheme = true,
                 dynamicColor = false
             ) {
                 Box(
@@ -1367,19 +1418,12 @@ class MainActivity : ComponentActivity() {
                     // Keep the main screen composed immediately.
                     // Its initial TMDB request starts during the splash.
                     ScreenRouletteScreen(
-                        appearance = appearance,
                         onInitialLoadFinished = {
                             initialRecommendationsFinished = true
-                        },
-                        onAppearanceChange = { selected ->
-                            appearance = selected
-                            preferences.edit()
-                                .putString("appearance", selected.name)
-                                .apply()
                         }
                     )
 
-                    // The static splash covers the main screen
+                    // The splash covers the main screen
                     // without delaying its initial data loading.
                     if (showSplash) {
                         Box(
@@ -1387,7 +1431,7 @@ class MainActivity : ComponentActivity() {
                                 .fillMaxSize()
                                 .background(Color(0xFF10291F))
                         ) {
-                            RouletteSplashScreen()
+                            RouletteSplashScreen(startSpin) { spinFinished = true }
                         }
                     }
                 }
@@ -1398,8 +1442,6 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ScreenRouletteScreen(
-    appearance: AppearanceMode,
-    onAppearanceChange: (AppearanceMode) -> Unit,
     onInitialLoadFinished: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -1411,20 +1453,19 @@ fun ScreenRouletteScreen(
         Calendar.getInstance().get(Calendar.YEAR)
     }
 
-    val defaultFilters = remember {
+    fun defaultFilters(category: ContentCategory): MovieFilters =
         MovieFilters(
             genreIds = emptySet(),
             matchAll = false,
-            startYear = 1990,
+            startYear = if (category == ContentCategory.FILMS) EARLIEST_RELEASE_YEAR else 1990,
             endYear = currentYear
         )
-    }
 
-    val initialFilters = remember(context, defaultFilters) {
+    val initialFilters = remember(context, currentYear) {
         loadCategoryFilters(
             context,
             ContentCategory.FILMS,
-            defaultFilters
+            defaultFilters(ContentCategory.FILMS)
         )
     }
 
@@ -1441,11 +1482,11 @@ fun ScreenRouletteScreen(
             listOf(MovieGenre(99, "Documentary"))
     }
 
-    val savedCategoryFilters = remember(context, defaultFilters) {
+    val savedCategoryFilters = remember(context, currentYear) {
         mutableStateMapOf<ContentCategory, MovieFilters>().apply {
             ContentCategory.values().forEach { category ->
                 this[category] = loadCategoryFilters(
-                    context, category, defaultFilters
+                    context, category, defaultFilters(category)
                 )
             }
         }
@@ -1506,8 +1547,16 @@ fun ScreenRouletteScreen(
         mutableStateOf(false)
     }
 
-    var recommendations by remember {
+    var showYearEditor by remember {
+        mutableStateOf(false)
+    }
+
+    var recommendations by remember(selectedCategory, activeFilters) {
         mutableStateOf<List<Movie>>(emptyList())
+    }
+
+    val spinHistory = remember(selectedCategory, activeFilters) {
+        mutableStateListOf<List<Movie>>()
     }
 
     var seenIds by remember {
@@ -1516,6 +1565,10 @@ fun ScreenRouletteScreen(
 
     var rollNumber by remember {
         mutableIntStateOf(0)
+    }
+
+    var shuffleRecommendations by remember {
+        mutableStateOf(false)
     }
 
     var loading by remember {
@@ -1538,6 +1591,7 @@ fun ScreenRouletteScreen(
         }
     }
     var showWatchlist by remember { mutableStateOf(false) }
+    var showAbout by remember { mutableStateOf(false) }
 
     fun toggleWatchlist(movie: Movie, category: ContentCategory) {
         val existing = watchlist.indexOfFirst {
@@ -1576,6 +1630,8 @@ fun ScreenRouletteScreen(
     LaunchedEffect(selectedCategory, activeFilters, rollNumber) {
         val spinStart = android.os.SystemClock.elapsedRealtime()
         var spinRetried = false
+        val newestFirst = selectedCategory == ContentCategory.FILMS && !shuffleRecommendations
+        val previousResults = recommendations
 
         loading = true
         error = null
@@ -1585,7 +1641,8 @@ fun ScreenRouletteScreen(
             val newMovies = fetchCategoryRecommendations(
                 category = selectedCategory,
                 excludedIds = seenIds,
-                filters = activeFilters
+                filters = activeFilters,
+                newestFirst = newestFirst
             )
 
             // Final verification before displaying films.
@@ -1610,7 +1667,8 @@ fun ScreenRouletteScreen(
                 val retryMovies = fetchCategoryRecommendations(
                     category = selectedCategory,
                     excludedIds = emptySet(),
-                    filters = activeFilters
+                    filters = activeFilters,
+                    newestFirst = newestFirst
                 )
 
                 val retryVerified = retryMovies.filter {
@@ -1646,11 +1704,21 @@ fun ScreenRouletteScreen(
                 recommendations = verifiedMovies
                 seenIds = seenIds + verifiedMovies.map { it.id }
             }
+
+            if (shuffleRecommendations && previousResults.isNotEmpty() &&
+                recommendations.isNotEmpty() && previousResults != recommendations
+            ) {
+                spinHistory.add(previousResults)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             error = e.message ?: "Unable to load films"
         } finally {
+            if (recommendations.isEmpty() && error != null) {
+                recommendations = previousResults
+            }
+
             val spinDuration =
                 android.os.SystemClock.elapsedRealtime() - spinStart
 
@@ -1667,6 +1735,24 @@ fun ScreenRouletteScreen(
             loading = false
             onInitialLoadFinished()
         }
+    }
+
+    if (showAbout) {
+        AboutScreenRouletteDialog(onDismiss = { showAbout = false })
+    }
+
+    if (showYearEditor) {
+        ReleaseYearsDialog(
+            startYear = startYearText,
+            endYear = endYearText,
+            latestYear = currentYear,
+            onDismiss = { showYearEditor = false },
+            onConfirm = { from, to ->
+                startYearText = from
+                endYearText = to
+                showYearEditor = false
+            }
+        )
     }
 
     Scaffold(
@@ -1722,7 +1808,7 @@ fun ScreenRouletteScreen(
                                             selectedCategory = entry.category
                                             activeFilters =
                                                 savedCategoryFilters[entry.category]
-                                                    ?: defaultFilters
+                                                    ?: defaultFilters(entry.category)
                                             navigationStack.add(entry.movie)
                                         }) {
                                             Text("View details")
@@ -1746,99 +1832,31 @@ fun ScreenRouletteScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
-                    .padding(16.dp)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
             ) {
-                Text(
-                    "ScreenRoulette",
-                    style = MaterialTheme.typography.headlineLarge
-                )
-
-                Spacer(Modifier.height(4.dp))
-
-                Text(
-                    text = "Winners know what to watch.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-
-                Spacer(Modifier.height(16.dp))
-
-                Text(
-                    "Appearance",
-                    style = MaterialTheme.typography.labelLarge
-                )
-
                 Row(
-                    horizontalArrangement =
-                        Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    listOf(
-                        AppearanceMode.DARK to "Dark",
-                        AppearanceMode.LIGHT to "Light",
-                        AppearanceMode.SYSTEM to "System"
-                    ).forEach { (mode, label) ->
-                        if (appearance == mode) {
-                            Button(
-                                onClick = {
-                                    onAppearanceChange(mode)
-                                },
-                                modifier = Modifier.weight(1f),
-                                contentPadding = PaddingValues(
-                                    horizontal = 4.dp,
-                                    vertical = 8.dp
-                                )
-                            ) {
-                                Text(label)
-                            }
-                        } else {
-                            OutlinedButton(
-                                onClick = {
-                                    onAppearanceChange(mode)
-                                },
-                                modifier = Modifier.weight(1f),
-                                contentPadding = PaddingValues(
-                                    horizontal = 4.dp,
-                                    vertical = 8.dp
-                                )
-                            ) {
-                                Text(label)
-                            }
-                        }
+                    Text(
+                        "ScreenRoulette",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.headlineSmall
+                    )
+                    OutlinedButton(
+                        onClick = { showWatchlist = true },
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Watchlist (${watchlist.size})")
+                    }
+                    TextButton(
+                        onClick = { showAbout = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text("About")
                     }
                 }
-
-                Spacer(Modifier.height(12.dp))
-
-                OutlinedButton(
-                    onClick = { showWatchlist = true },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp,
-                        MaterialTheme.colorScheme.primary
-                    ),
-                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
-                        contentColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Text("My Watchlist (${watchlist.size})")
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                Text(
-                    text = "Winners know what to watch.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-
-                Spacer(Modifier.height(12.dp))
-
-                Text(
-                    "What would you like to watch?",
-                    style = MaterialTheme.typography.titleMedium
-                )
 
                 Spacer(Modifier.height(8.dp))
 
@@ -1859,7 +1877,7 @@ fun ScreenRouletteScreen(
                                     if (selectedCategory != category) {
                                         val restored =
                                             savedCategoryFilters[category]
-                                                ?: defaultFilters
+                                                ?: defaultFilters(category)
 
                                         selectedCategory = category
                                         activeFilters = restored
@@ -1878,6 +1896,7 @@ fun ScreenRouletteScreen(
                                             restored.endYear.toString()
 
                                         seenIds = emptySet()
+                                        shuffleRecommendations = false
                                         recommendations = emptyList()
                                         navigationStack.clear()
                                         filtersExpanded = false
@@ -1900,7 +1919,7 @@ fun ScreenRouletteScreen(
                                     if (selectedCategory != category) {
                                         val restored =
                                             savedCategoryFilters[category]
-                                                ?: defaultFilters
+                                                ?: defaultFilters(category)
 
                                         selectedCategory = category
                                         activeFilters = restored
@@ -1919,6 +1938,7 @@ fun ScreenRouletteScreen(
                                             restored.endYear.toString()
 
                                         seenIds = emptySet()
+                                        shuffleRecommendations = false
                                         recommendations = emptyList()
                                         navigationStack.clear()
                                         filtersExpanded = false
@@ -1939,25 +1959,7 @@ fun ScreenRouletteScreen(
                     }
                 }
 
-                if (selectedCategory != ContentCategory.FILMS) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        if (selectedCategory == ContentCategory.TV_SERIES) {
-                            "Showing television series from TMDB."
-                        } else {
-                            "Showing documentary films from TMDB."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.secondary
-                    )
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                Text(
-                    "Active Filters",
-                    style = MaterialTheme.typography.titleSmall
-                )
+                Spacer(Modifier.height(4.dp))
 
                 Text(
                     if (selectedCategory == ContentCategory.DOCUMENTARIES) {
@@ -1974,61 +1976,53 @@ fun ScreenRouletteScreen(
                     color = MaterialTheme.colorScheme.primary
                 )
 
-                // Step 41: Worldwide Discovery shortcut
-                if (
-                    activeFilters.streamingRegion.isNotBlank() ||
-                    activeFilters.streamingProviderId != 0
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Spacer(Modifier.height(8.dp))
-
                     OutlinedButton(
-                        onClick = {
-                            val updated = activeFilters.copy(
-                                streamingRegion = "",
-                                streamingProviderId = 0
-                            )
-
-                            activeFilters = updated
-                            streamingRegion = ""
-                            streamingProviderId = 0
-
-                            savedCategoryFilters[selectedCategory] = updated
-                            saveCategoryFilters(
-                                context,
-                                selectedCategory,
-                                updated
-                            )
-
-                            seenIds = emptySet()
-                            recommendations = emptyList()
-                            navigationStack.clear()
-                            filtersExpanded = false
-                        },
-                        enabled = !loading,
-                        modifier = Modifier.fillMaxWidth()
+                        onClick = { filtersExpanded = !filtersExpanded },
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Text("🌍 Switch to Worldwide Discovery")
+                        Text(if (filtersExpanded) "Hide Filters" else "Show Filters")
+                    }
+
+                    if (activeFilters.streamingRegion.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = {
+                                val updated = activeFilters.copy(
+                                    streamingRegion = "",
+                                    streamingProviderId = 0
+                                )
+
+                                activeFilters = updated
+                                streamingRegion = ""
+                                streamingProviderId = 0
+                                savedCategoryFilters[selectedCategory] = updated
+                                saveCategoryFilters(context, selectedCategory, updated)
+
+                                seenIds = emptySet()
+                                shuffleRecommendations = false
+                                recommendations = emptyList()
+                                navigationStack.clear()
+                                filtersExpanded = false
+                            },
+                            enabled = !loading,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Switch to Worldwide")
+                        }
                     }
                 }
 
-                Spacer(Modifier.height(12.dp))
-
-                OutlinedButton(
-                    onClick = {
-                        filtersExpanded = !filtersExpanded
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        if (filtersExpanded) {
-                            "Hide Filters"
-                        } else {
-                            "Show Filters"
-                        }
-                    )
-                }
-
                 if (filtersExpanded) {
+                    OutlinedButton(
+                        onClick = { showYearEditor = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Release years · $startYearText–$endYearText")
+                    }
+
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2323,56 +2317,6 @@ fun ScreenRouletteScreen(
                             )
                         }
 
-                        item {
-                            Text(
-                                "Release years",
-                                style = MaterialTheme
-                                    .typography.titleMedium
-                            )
-
-                            Row(
-                                horizontalArrangement =
-                                    Arrangement.spacedBy(12.dp)
-                            ) {
-                                OutlinedTextField(
-                                    value = startYearText,
-                                    onValueChange = {
-                                        startYearText =
-                                            it.filter { char ->
-                                                char.isDigit()
-                                            }.take(4)
-                                    },
-                                    label = { Text("From") },
-                                    keyboardOptions =
-                                        KeyboardOptions(
-                                            keyboardType =
-                                                KeyboardType.Number
-                                        ),
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f)
-                                )
-
-                                OutlinedTextField(
-                                    value = endYearText,
-                                    onValueChange = {
-                                        endYearText =
-                                            it.filter { char ->
-                                                char.isDigit()
-                                            }.take(4)
-                                    },
-                                    label = { Text("To") },
-                                    keyboardOptions =
-                                        KeyboardOptions(
-                                            keyboardType =
-                                                KeyboardType.Number
-                                        ),
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                        }
-
-
                     }
 
                     Spacer(Modifier.height(8.dp))
@@ -2384,7 +2328,7 @@ fun ScreenRouletteScreen(
                         // Step 45: Reset applied filters
                         OutlinedButton(
                             onClick = {
-                                val reset = defaultFilters
+                                val reset = defaultFilters(selectedCategory)
 
                                 selectedGenres = reset.genreIds
                                 matchAll = reset.matchAll
@@ -2405,7 +2349,9 @@ fun ScreenRouletteScreen(
                                 )
 
                                 seenIds = emptySet()
+                                shuffleRecommendations = false
                                 recommendations = emptyList()
+                                spinHistory.clear()
                                 navigationStack.clear()
                                 filtersExpanded = false
 
@@ -2437,11 +2383,11 @@ fun ScreenRouletteScreen(
                                 if (
                                     from == null ||
                                     to == null ||
-                                    from < 1874 ||
+                                    from < EARLIEST_RELEASE_YEAR ||
                                     to > currentYear ||
                                     from > to
                                 ) {
-                                    error = "Enter a valid year range between 1874 and $currentYear."
+                                    error = "Enter a valid year range between $EARLIEST_RELEASE_YEAR and $currentYear."
                                 } else {
                                     val newFilters = MovieFilters(
                                         genreIds = selectedGenres.toSet(),
@@ -2464,7 +2410,9 @@ fun ScreenRouletteScreen(
                                     )
 
                                     seenIds = emptySet()
+                                    shuffleRecommendations = false
                                     recommendations = emptyList()
+                                    spinHistory.clear()
                                     filtersExpanded = false
 
                                     if (newFilters == activeFilters) {
@@ -2500,7 +2448,10 @@ fun ScreenRouletteScreen(
                 ) {
                     Button(
                         // SCREENROULETTE_ACCESSIBILITY_STEP25
-                        onClick = { rollNumber++ },
+                        onClick = {
+                            shuffleRecommendations = true
+                            rollNumber++
+                        },
                         modifier = Modifier.semantics {
                             contentDescription =
                                 "Spin for new recommendations"
@@ -2513,6 +2464,18 @@ fun ScreenRouletteScreen(
                         )
                     ) {
                         Text("SPIN")
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            recommendations = spinHistory.removeAt(spinHistory.lastIndex)
+                            error = null
+                            recommendationListState.requestScrollToItem(0)
+                        },
+                        enabled = !loading && spinHistory.isNotEmpty(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Reverse spin")
                     }
 
                     Text(
@@ -2548,7 +2511,7 @@ fun ScreenRouletteScreen(
                     LazyColumn(
                         state = recommendationListState,
                         verticalArrangement =
-                            Arrangement.spacedBy(12.dp)
+                            Arrangement.spacedBy(8.dp)
                     ) {
                         items(
                             recommendations,
@@ -2634,6 +2597,95 @@ private fun MoviePoster(
     }
 }
 
+@Composable
+private fun AboutScreenRouletteDialog(onDismiss: () -> Unit) {
+    val uriHandler = LocalUriHandler.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("About ScreenRoulette") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Version ${BuildConfig.VERSION_NAME}")
+                Image(
+                    painter = painterResource(R.drawable.tmdb_logo),
+                    contentDescription = "The Movie Database",
+                    modifier = Modifier.width(120.dp)
+                )
+                Text("This product uses the TMDB API but is not endorsed or certified by TMDB.")
+                Text("Streaming availability is supplied by TMDB and JustWatch. IMDb and Rotten Tomatoes ratings are retrieved through OMDb.")
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        dismissButton = {
+            TextButton(onClick = { uriHandler.openUri("https://www.themoviedb.org") }) {
+                Text("Visit TMDB")
+            }
+        }
+    )
+}
+
+@Composable
+private fun ReleaseYearsDialog(
+    startYear: String,
+    endYear: String,
+    latestYear: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String) -> Unit
+) {
+    var from by remember { mutableStateOf(startYear) }
+    var to by remember { mutableStateOf(endYear) }
+    val focusManager = LocalFocusManager.current
+    val earliest = from.toIntOrNull()
+    val latest = to.toIntOrNull()
+    val valid = earliest != null && latest != null &&
+        earliest >= EARLIEST_RELEASE_YEAR && earliest <= latest && latest <= latestYear
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Release years", style = MaterialTheme.typography.titleMedium) },
+        text = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = from,
+                    onValueChange = { from = it.filter(Char::isDigit).take(4) },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("From") },
+                    textStyle = MaterialTheme.typography.bodyMedium,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Next
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onNext = { focusManager.moveFocus(FocusDirection.Next) }
+                    )
+                )
+                OutlinedTextField(
+                    value = to,
+                    onValueChange = { to = it.filter(Char::isDigit).take(4) },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("To") },
+                    textStyle = MaterialTheme.typography.bodyMedium,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(onDone = {
+                        if (valid) onConfirm(from, to)
+                    })
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(from, to) }, enabled = valid) {
+                Text("Set years")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
 // Step 42: Compact recommendation cards
 // Step 43: Streaming availability on cards
 @Composable
@@ -2688,20 +2740,20 @@ private fun MovieCard(
             .clickable(onClick = onClick)
     ) {
         Row(
-            modifier = Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.Top
         ) {
             MoviePoster(
                 movie = movie,
                 modifier = Modifier
-                    .width(90.dp)
-                    .height(135.dp)
+                    .width(70.dp)
+                    .height(105.dp)
             )
 
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(7.dp)
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text(
                     text = movie.title,

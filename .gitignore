@@ -17,6 +17,9 @@ local.properties
 **/build/
 *.jks
 *.keystore
+*.p12
+*.apk
+*.aab
 .env
 .env.*
 /.idea/
