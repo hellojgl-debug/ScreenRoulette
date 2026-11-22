@@ -1,6 +1,16 @@
 package com.hellojgl.screenroulette
 
 import android.os.Bundle
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.Offset
+import kotlinx.coroutines.delay
+
 import android.content.Context
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.activity.ComponentActivity
@@ -45,6 +55,82 @@ data class Movie(
     val genreIds: Set<Int>,
     val originalLanguage: String = ""
 )
+
+// Step 46: Persistent Watchlist
+data class WatchlistEntry(
+    val movie: Movie,
+    val category: ContentCategory
+)
+
+private fun loadWatchlist(context: Context): List<WatchlistEntry> {
+    return runCatching {
+        val raw = context.getSharedPreferences(
+            "screenroulette_watchlist", Context.MODE_PRIVATE
+        ).getString("entries", "[]") ?: "[]"
+        val array = JSONArray(raw)
+        buildList {
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+                val movieJson = item.getJSONObject("movie")
+                val genres = movieJson.optJSONArray("genres")
+                val genreIds = mutableSetOf<Int>()
+                if (genres != null) {
+                    for (j in 0 until genres.length()) {
+                        genreIds.add(genres.getInt(j))
+                    }
+                }
+                add(
+                    WatchlistEntry(
+                        movie = Movie(
+                            id = movieJson.getInt("id"),
+                            title = movieJson.getString("title"),
+                            year = movieJson.optString("year"),
+                            rating = movieJson.optString("rating"),
+                            overview = movieJson.optString("overview"),
+                            posterPath = movieJson.optString("poster")
+                                .takeIf { it.isNotBlank() },
+                            genreIds = genreIds,
+                            originalLanguage =
+                                movieJson.optString("language")
+                        ),
+                        category = ContentCategory.valueOf(
+                            item.getString("category")
+                        )
+                    )
+                )
+            }
+        }
+    }.getOrDefault(emptyList())
+}
+
+private fun saveWatchlist(
+    context: Context,
+    entries: List<WatchlistEntry>
+) {
+    val array = JSONArray()
+    entries.forEach { entry ->
+        val movie = entry.movie
+        val movieJson = JSONObject().apply {
+            put("id", movie.id)
+            put("title", movie.title)
+            put("year", movie.year)
+            put("rating", movie.rating)
+            put("overview", movie.overview)
+            put("poster", movie.posterPath ?: "")
+            put("genres", JSONArray(movie.genreIds.toList()))
+            put("language", movie.originalLanguage)
+        }
+        array.put(
+            JSONObject().apply {
+                put("category", entry.category.name)
+                put("movie", movieJson)
+            }
+        )
+    }
+    context.getSharedPreferences(
+        "screenroulette_watchlist", Context.MODE_PRIVATE
+    ).edit().putString("entries", array.toString()).apply()
+}
 
 data class ImdbInfo(
     val imdbRating: String = "N/A",
@@ -820,6 +906,146 @@ enum class AppearanceMode {
     SYSTEM
 }
 
+
+// ScreenRoulette animated splash screen
+@Composable
+private fun RouletteSplashScreen() {
+    val rotation = rememberInfiniteTransition(
+        label = "rouletteRotation"
+    )
+
+    val angle by rotation.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(
+                durationMillis = 2200,
+                easing = LinearEasing
+            ),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "wheelAngle"
+    )
+
+    val green = Color(0xFF073D2B)
+    val gold = Color(0xFFD6B66A)
+    val red = Color(0xFFB71C1C)
+    val black = Color(0xFF171717)
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(green)
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "SCREENROULETTE",
+            style = MaterialTheme.typography.headlineMedium,
+            color = gold
+        )
+
+        Spacer(Modifier.height(34.dp))
+
+        Box(
+            modifier = Modifier.size(280.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(rotationZ = angle)
+            ) {
+                val radius = size.minDimension / 2f
+                val centre = Offset(
+                    size.width / 2f,
+                    size.height / 2f
+                )
+
+                drawCircle(
+                    color = gold,
+                    radius = radius
+                )
+                drawCircle(
+                    color = black,
+                    radius = radius * 0.95f
+                )
+
+                val numbers = 37
+                val sweep = 360f / numbers
+
+                for (i in 0 until numbers) {
+                    val colour = when {
+                        i == 0 -> Color(0xFF138447)
+                        i % 2 == 0 -> red
+                        else -> black
+                    }
+
+                    drawArc(
+                        color = colour,
+                        startAngle = -90f + i * sweep,
+                        sweepAngle = sweep,
+                        useCenter = true,
+                        topLeft = Offset(
+                            centre.x - radius * 0.88f,
+                            centre.y - radius * 0.88f
+                        ),
+                        size = androidx.compose.ui.geometry.Size(
+                            radius * 1.76f,
+                            radius * 1.76f
+                        )
+                    )
+                }
+
+                drawCircle(
+                    color = gold,
+                    radius = radius * 0.58f
+                )
+                drawCircle(
+                    color = Color(0xFF56371A),
+                    radius = radius * 0.54f
+                )
+                drawCircle(
+                    color = gold,
+                    radius = radius * 0.17f
+                )
+                drawCircle(
+                    color = Color(0xFFFFE7A5),
+                    radius = radius * 0.07f
+                )
+            }
+
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                drawCircle(
+                    color = Color.White,
+                    radius = 9.dp.toPx(),
+                    center = Offset(
+                        size.width / 2f,
+                        size.height * 0.065f
+                    )
+                )
+            }
+        }
+
+        Spacer(Modifier.height(34.dp))
+
+        Text(
+            text = "Five films. One decision.",
+            style = MaterialTheme.typography.titleMedium,
+            color = Color.White
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        Text(
+            text = "LET THE WHEEL DECIDE",
+            style = MaterialTheme.typography.labelLarge,
+            color = gold
+        )
+    }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -852,11 +1078,23 @@ class MainActivity : ComponentActivity() {
                 AppearanceMode.SYSTEM -> systemDark
             }
 
+            var showSplash by remember {
+                mutableStateOf(true)
+            }
+
+            LaunchedEffect(Unit) {
+                delay(2500)
+                showSplash = false
+            }
+
             ScreenRouletteTheme(
                 darkTheme = useDarkTheme,
                 dynamicColor = false
             ) {
-                ScreenRouletteScreen(
+                if (showSplash) {
+                    RouletteSplashScreen()
+                } else {
+                    ScreenRouletteScreen(
                     appearance = appearance,
                     onAppearanceChange = { selected ->
                         appearance = selected
@@ -865,6 +1103,7 @@ class MainActivity : ComponentActivity() {
                             .apply()
                     }
                 )
+                }
             }
         }
     }
@@ -1005,6 +1244,25 @@ fun ScreenRouletteScreen(
 
     val selectedMovie = navigationStack.lastOrNull()
 
+    val watchlist = remember(context) {
+        mutableStateListOf<WatchlistEntry>().apply {
+            addAll(loadWatchlist(context))
+        }
+    }
+    var showWatchlist by remember { mutableStateOf(false) }
+
+    fun toggleWatchlist(movie: Movie, category: ContentCategory) {
+        val existing = watchlist.indexOfFirst {
+            it.movie.id == movie.id && it.category == category
+        }
+        if (existing >= 0) {
+            watchlist.removeAt(existing)
+        } else {
+            watchlist.add(WatchlistEntry(movie, category))
+        }
+        saveWatchlist(context, watchlist.toList())
+    }
+
     val recommendationListState = rememberLazyListState()
 
     fun goBack() {
@@ -1015,8 +1273,14 @@ fun ScreenRouletteScreen(
         }
     }
 
-    BackHandler(enabled = navigationStack.isNotEmpty()) {
-        goBack()
+    BackHandler(
+        enabled = navigationStack.isNotEmpty() || showWatchlist
+    ) {
+        if (navigationStack.isNotEmpty()) {
+            goBack()
+        } else {
+            showWatchlist = false
+        }
     }
 
     // A new request is triggered whenever the active
@@ -1070,7 +1334,75 @@ fun ScreenRouletteScreen(
         modifier = Modifier.fillMaxSize()
     ) { innerPadding ->
 
-        if (selectedMovie == null) {
+        if (selectedMovie == null && showWatchlist) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(16.dp)
+            ) {
+                TextButton(onClick = { showWatchlist = false }) {
+                    Text("← Back to recommendations")
+                }
+                Text(
+                    "My Watchlist (${watchlist.size})",
+                    style = MaterialTheme.typography.headlineMedium
+                )
+                Spacer(Modifier.height(12.dp))
+
+                if (watchlist.isEmpty()) {
+                    Text("No saved titles yet.")
+                } else {
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(
+                            watchlist.toList(),
+                            key = { "${it.category.name}_${it.movie.id}" }
+                        ) { entry ->
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement =
+                                        Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        entry.movie.title,
+                                        style =
+                                            MaterialTheme.typography.titleMedium
+                                    )
+                                    Text(
+                                        "${entry.category.name.replace('_', ' ')}" +
+                                            " • ${entry.movie.year}"
+                                    )
+                                    Row(
+                                        horizontalArrangement =
+                                            Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Button(onClick = {
+                                            selectedCategory = entry.category
+                                            activeFilters =
+                                                savedCategoryFilters[entry.category]
+                                                    ?: defaultFilters
+                                            navigationStack.add(entry.movie)
+                                        }) {
+                                            Text("View details")
+                                        }
+                                        OutlinedButton(onClick = {
+                                            toggleWatchlist(
+                                                entry.movie, entry.category
+                                            )
+                                        }) {
+                                            Text("Remove")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (selectedMovie == null) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1127,6 +1459,15 @@ fun ScreenRouletteScreen(
                             }
                         }
                     }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                OutlinedButton(
+                    onClick = { showWatchlist = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("My Watchlist (${watchlist.size})")
                 }
 
                 Spacer(Modifier.height(12.dp))
@@ -1832,6 +2173,13 @@ fun ScreenRouletteScreen(
                 streamingRegion = activeFilters.streamingRegion,
                 padding = innerPadding,
                 onBack = { goBack() },
+                isWatchlisted = watchlist.any {
+                    it.movie.id == selectedMovie.id &&
+                        it.category == selectedCategory
+                },
+                onToggleWatchlist = {
+                    toggleWatchlist(selectedMovie, selectedCategory)
+                },
                 onMovieSelected = {
                     navigationStack.add(it)
                 }
@@ -2039,6 +2387,8 @@ private fun MovieDetailsScreen(
     streamingRegion: String,
     padding: PaddingValues,
     onBack: () -> Unit,
+    isWatchlisted: Boolean,
+    onToggleWatchlist: () -> Unit,
     onMovieSelected: (Movie) -> Unit
 ) {
     var streamingAvailability by remember(movie.id, streamingRegion) {
@@ -2153,6 +2503,21 @@ private fun MovieDetailsScreen(
                     movie.title,
                     style = MaterialTheme.typography.headlineMedium
                 )
+            }
+
+            item {
+                Button(
+                    onClick = onToggleWatchlist,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        if (isWatchlisted) {
+                            "Remove from Watchlist"
+                        } else {
+                            "Save to Watchlist"
+                        }
+                    )
+                }
             }
 
             item {
