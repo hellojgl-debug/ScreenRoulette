@@ -691,6 +691,11 @@ private suspend fun fetchCategoryRecommendations(
     excludedIds: Set<Int>,
     filters: MovieFilters
 ): List<Movie> {
+    val diagnosticStart = android.os.SystemClock.elapsedRealtime()
+    var diagnosticPages = 0
+    var diagnosticExcluded = 0
+    var diagnosticParsed = 0
+
     val isTV = category == ContentCategory.TV_SERIES
 
     val effectiveGenres = if (
@@ -765,7 +770,10 @@ private suspend fun fetchCategoryRecommendations(
     val candidateIds = mutableSetOf<Int>()
 
     fun collect(response: JSONObject) {
+        diagnosticPages++
         parseTitles(response, category).forEach { title ->
+            diagnosticParsed++
+            if (title.id in excludedIds) diagnosticExcluded++
             if (
                 title.id !in excludedIds &&
                 title.id !in candidateIds &&
@@ -804,6 +812,20 @@ private suspend fun fetchCategoryRecommendations(
             }
         }
     }
+
+    val elapsed = android.os.SystemClock.elapsedRealtime() -
+        diagnosticStart
+
+    android.util.Log.d(
+        "ScreenRouletteSpin",
+        "category=$category " +
+        "pages=$diagnosticPages " +
+        "parsed=$diagnosticParsed " +
+        "excluded=$diagnosticExcluded " +
+        "eligible=${candidates.size} " +
+        "previouslySeen=${excludedIds.size} " +
+        "durationMs=$elapsed"
+    )
 
     return candidates.shuffled().take(5)
 }
@@ -1305,8 +1327,19 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(true)
             }
 
+            var initialRecommendationsFinished by remember {
+                mutableStateOf(false)
+            }
+
+            LaunchedEffect(initialRecommendationsFinished) {
+                if (initialRecommendationsFinished) {
+                    delay(1000)
+                    showSplash = false
+                }
+            }
+
             LaunchedEffect(Unit) {
-                delay(500)
+                delay(5000)
                 showSplash = false
             }
 
@@ -1321,6 +1354,9 @@ class MainActivity : ComponentActivity() {
                     // Its initial TMDB request starts during the splash.
                     ScreenRouletteScreen(
                         appearance = appearance,
+                        onInitialLoadFinished = {
+                            initialRecommendationsFinished = true
+                        },
                         onAppearanceChange = { selected ->
                             appearance = selected
                             preferences.edit()
@@ -1349,7 +1385,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ScreenRouletteScreen(
     appearance: AppearanceMode,
-    onAppearanceChange: (AppearanceMode) -> Unit
+    onAppearanceChange: (AppearanceMode) -> Unit,
+    onInitialLoadFinished: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var selectedCategory by remember {
@@ -1569,6 +1606,7 @@ fun ScreenRouletteScreen(
             error = e.message ?: "Unable to load films"
         } finally {
             loading = false
+            onInitialLoadFinished()
         }
     }
 
