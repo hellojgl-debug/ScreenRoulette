@@ -447,9 +447,14 @@ private suspend fun fetchStreamingAvailability(
     )
 }
 
-private fun posterUrl(path: String?): String? {
+// Step 6: Optimised poster sizes
+private fun posterUrl(
+    path: String?,
+    large: Boolean = false
+): String? {
     if (path.isNullOrBlank()) return null
-    return "https://image.tmdb.org/t/p/w500$path"
+    val width = if (large) "w500" else "w185"
+    return "https://image.tmdb.org/t/p/$width$path"
 }
 
 private fun genreLabel(movie: Movie): String {
@@ -790,21 +795,25 @@ private suspend fun fetchCategoryRecommendations(
 
     collect(first)
 
-    // Performance optimisation: concurrent discovery
-    val remainingPages = (2..totalPages).shuffled().take(24)
+    // Adaptive discovery: search more pages only when necessary.
+    val remainingPages = (2..totalPages).shuffled().take(40)
 
     for (batch in remainingPages.chunked(4)) {
-        if (candidates.size >= 30) break
+        if (candidates.size >= 5) break
 
         kotlinx.coroutines.coroutineScope {
             batch.map { page ->
                 async {
-                    runCatching {
+                    try {
                         tmdbRequest(
                             endpoint,
                             parameters + ("page" to page.toString())
                         )
-                    }.getOrNull()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        null
+                    }
                 }
             }.awaitAll().filterNotNull().forEach { response ->
                 collect(response)
@@ -1059,29 +1068,9 @@ enum class AppearanceMode {
 // Realistic roulette animation v2
 @Composable
 private fun RouletteSplashScreen() {
-    val wheel = remember { Animatable(0f) }
-    val ball = remember { Animatable(0f) }
-
-    LaunchedEffect(Unit) {
-        launch {
-            wheel.animateTo(
-                targetValue = 1080f + 127f,
-                animationSpec = tween(
-                    durationMillis = 3700,
-                    easing = FastOutSlowInEasing
-                )
-            )
-        }
-        launch {
-            ball.animateTo(
-                targetValue = -1800f - 127f,
-                animationSpec = tween(
-                    durationMillis = 3900,
-                    easing = FastOutSlowInEasing
-                )
-            )
-        }
-    }
+    // Static roulette wheel, no animation.
+    val wheelAngle = 127f
+    val ballAngleDegrees = -127f
 
     val green = Color(0xFF073D2B)
     val gold = Color(0xFFD6B66A)
@@ -1152,7 +1141,7 @@ private fun RouletteSplashScreen() {
 
                 // Rotate numbered wheel clockwise.
                 rotate(
-                    degrees = wheel.value,
+                    degrees = wheelAngle,
                     pivot = Offset(cx, cy)
                 ) {
                     for (i in numbers.indices) {
@@ -1242,7 +1231,7 @@ private fun RouletteSplashScreen() {
 
                 // Ball travels anticlockwise independently.
                 val ballAngle = Math.toRadians(
-                    (-90.0 + ball.value)
+                    (-90.0 + ballAngleDegrees)
                 )
                 val ballRadius = radius * 0.93f
                 val ballX = cx +
@@ -1333,7 +1322,7 @@ class MainActivity : ComponentActivity() {
             }
 
             LaunchedEffect(Unit) {
-                delay(1500)
+                delay(500)
                 showSplash = false
             }
 
@@ -1562,10 +1551,15 @@ fun ScreenRouletteScreen(
                 )
             }
 
-            if (verifiedMovies.isEmpty()) {
+            if (verifiedMovies.isEmpty() && seenIds.isNotEmpty()) {
+                // Restart the recommendation cycle when history
+                // prevents any matching titles being returned.
+                seenIds = emptySet()
+                rollNumber++
+            } else if (verifiedMovies.isEmpty()) {
                 error =
                     "No matching films found. " +
-                            "Try broader filters."
+                    "Try broader filters."
             } else {
                 recommendations = verifiedMovies
                 seenIds = seenIds +
@@ -2467,9 +2461,10 @@ fun ScreenRouletteScreen(
 @Composable
 private fun MoviePoster(
     movie: Movie,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    large: Boolean = false
 ) {
-    val url = posterUrl(movie.posterPath)
+    val url = posterUrl(movie.posterPath, large)
 
     if (url == null) {
         Surface(
@@ -2801,7 +2796,8 @@ private fun MovieDetailsScreen(
                     movie = movie,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(320.dp)
+                        .height(320.dp),
+                    large = true
                 )
             }
 
