@@ -1678,20 +1678,44 @@ fun ScreenRouletteScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        // Step 45: Reset applied filters
                         OutlinedButton(
                             onClick = {
-                                selectedGenres = emptySet()
-                                matchAll = false
-                                startYearText = "1990"
-                                endYearText = currentYear.toString()
-                                minimumRating = 0f
-                                originalLanguageFilter = "all"
-                                streamingRegion = ""
-                                streamingProviderId = 0
+                                val reset = defaultFilters
+
+                                selectedGenres = reset.genreIds
+                                matchAll = reset.matchAll
+                                startYearText = reset.startYear.toString()
+                                endYearText = reset.endYear.toString()
+                                minimumRating = reset.minRating.toFloat()
+                                originalLanguageFilter =
+                                    reset.originalLanguageFilter
+                                streamingRegion = reset.streamingRegion
+                                streamingProviderId =
+                                    reset.streamingProviderId
+
+                                savedCategoryFilters[selectedCategory] = reset
+                                saveCategoryFilters(
+                                    context,
+                                    selectedCategory,
+                                    reset
+                                )
+
+                                seenIds = emptySet()
+                                recommendations = emptyList()
+                                navigationStack.clear()
+                                filtersExpanded = false
+
+                                if (activeFilters == reset) {
+                                    rollNumber++
+                                } else {
+                                    activeFilters = reset
+                                }
                             },
+                            enabled = !loading,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("Clear Filters")
+                            Text("Reset to Defaults")
                         }
 
                         Button(
