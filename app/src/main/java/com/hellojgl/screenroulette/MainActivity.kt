@@ -1,6 +1,7 @@
 package com.hellojgl.screenroulette
 
 import android.os.Bundle
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -38,7 +39,8 @@ data class Movie(
     val rating: String,
     val overview: String,
     val posterPath: String?,
-    val genreIds: Set<Int>
+    val genreIds: Set<Int>,
+    val originalLanguage: String = ""
 )
 
 data class ImdbInfo(
@@ -55,7 +57,11 @@ data class MovieFilters(
     val genreIds: Set<Int>,
     val matchAll: Boolean,
     val startYear: Int,
-    val endYear: Int
+    val endYear: Int,
+    val minRating: Double = 0.0,
+    val originalLanguageFilter: String = "all",
+    val streamingRegion: String = "",
+    val streamingProviderId: Int = 0
 )
 
 private val movieGenres = listOf(
@@ -85,6 +91,83 @@ private val genreNames = movieGenres.associate {
 }
 
 private val httpClient = OkHttpClient()
+
+private val streamingCountries = listOf(
+    "" to "Worldwide (no restriction)",
+    "US" to "United States",
+    "GB" to "United Kingdom",
+    "ZA" to "South Africa",
+    "CA" to "Canada",
+    "AU" to "Australia",
+    "NZ" to "New Zealand",
+    "IE" to "Ireland",
+    "IN" to "India",
+    "DE" to "Germany",
+    "FR" to "France",
+    "ES" to "Spain",
+    "IT" to "Italy",
+    "NL" to "Netherlands",
+    "JP" to "Japan",
+    "KR" to "South Korea",
+    "BR" to "Brazil"
+)
+
+data class StreamingProvider(val id: Int, val name: String)
+
+data class StreamingAvailability(
+    val subscription: List<String> = emptyList(),
+    val rent: List<String> = emptyList(),
+    val buy: List<String> = emptyList()
+)
+
+private suspend fun fetchStreamingProviders(
+    category: ContentCategory,
+    region: String
+): List<StreamingProvider> {
+    if (region.isBlank()) return emptyList()
+    val type = if (category == ContentCategory.TV_SERIES) "tv" else "movie"
+    val json = tmdbRequest(
+        "watch/providers/$type",
+        mapOf("watch_region" to region, "language" to "en-US")
+    )
+    val results = json.optJSONArray("results") ?: return emptyList()
+    return buildList {
+        for (i in 0 until results.length()) {
+            val item = results.getJSONObject(i)
+            val id = item.optInt("provider_id")
+            val name = item.optString("provider_name")
+            if (id > 0 && name.isNotBlank()) {
+                add(StreamingProvider(id, name))
+            }
+        }
+    }.distinctBy { it.id }.sortedBy { it.name.lowercase(Locale.ROOT) }
+}
+
+private suspend fun fetchStreamingAvailability(
+    movieId: Int,
+    category: ContentCategory,
+    region: String
+): StreamingAvailability {
+    if (region.isBlank()) return StreamingAvailability()
+    val type = if (category == ContentCategory.TV_SERIES) "tv" else "movie"
+    val response = tmdbRequest("$type/$movieId/watch/providers")
+    val country = response.optJSONObject("results")
+        ?.optJSONObject(region) ?: return StreamingAvailability()
+    fun names(key: String): List<String> {
+        val array = country.optJSONArray(key) ?: return emptyList()
+        return buildList {
+            for (i in 0 until array.length()) {
+                val name = array.getJSONObject(i).optString("provider_name")
+                if (name.isNotBlank()) add(name)
+            }
+        }.distinct().sorted()
+    }
+    return StreamingAvailability(
+        subscription = (names("flatrate") + names("free") + names("ads")).distinct().sorted(),
+        rent = names("rent"),
+        buy = names("buy")
+    )
+}
 
 private fun posterUrl(path: String?): String? {
     if (path.isNullOrBlank()) return null
@@ -120,7 +203,17 @@ private fun activeFilterLabel(filters: MovieFilters): String {
     }
 
     return "$genres | $matching | " +
-            "${filters.startYear}-${filters.endYear}"
+            "${filters.startYear}-${filters.endYear} | " +
+            "TMDB >= ${String.format(Locale.US, "%.1f", filters.minRating)} | " +
+            (when (filters.originalLanguageFilter) {
+                "en" -> "English only"
+                "international" -> "Non-English only"
+                else -> "All languages"
+            }) + " | " +
+            (streamingCountries.firstOrNull {
+                it.first == filters.streamingRegion
+            }?.second ?: "Worldwide") +
+            (if (filters.streamingProviderId > 0) " | Streaming provider selected" else "")
 }
 
 private suspend fun tmdbRequest(
@@ -200,7 +293,9 @@ private fun parseMovies(json: JSONObject): List<Movie> {
                         .takeIf {
                             it.isNotBlank() && it != "null"
                         },
-                    genreIds = genres
+                    genreIds = genres,
+                    originalLanguage =
+                        item.optString("original_language", "")
                 )
             )
         }
@@ -270,7 +365,9 @@ private fun parseTitles(
                     overview = item.optString("overview", ""),
                     posterPath = item.optString("poster_path")
                         .takeIf { it.isNotBlank() && it != "null" },
-                    genreIds = genres
+                    genreIds = genres,
+                    originalLanguage =
+                        item.optString("original_language", "")
                 )
             )
         }
@@ -321,6 +418,23 @@ private suspend fun fetchCategoryRecommendations(
         "sort_by" to "popularity.desc",
         "vote_count.gte" to "100"
     )
+
+    if (filters.originalLanguageFilter == "en") {
+        parameters["with_original_language"] = "en"
+    }
+
+    if (filters.minRating > 0.0) {
+        parameters["vote_average.gte"] =
+            filters.minRating.toString()
+    }
+
+    if (filters.streamingRegion.isNotBlank() &&
+        filters.streamingProviderId > 0) {
+        parameters["watch_region"] = filters.streamingRegion
+        parameters["with_watch_providers"] =
+            filters.streamingProviderId.toString()
+        parameters["with_watch_monetization_types"] = "flatrate|free|ads"
+    }
 
     if (isTV) {
         parameters["first_air_date.gte"] =
@@ -384,6 +498,19 @@ private suspend fun fetchCategoryRecommendations(
     return candidates.shuffled().take(5)
 }
 
+private fun matchesOriginalLanguage(
+    movie: Movie,
+    filters: MovieFilters
+): Boolean {
+    return when (filters.originalLanguageFilter) {
+        "en" -> movie.originalLanguage == "en"
+        "international" ->
+            movie.originalLanguage.isNotBlank() &&
+                movie.originalLanguage != "en"
+        else -> true
+    }
+}
+
 private fun movieMatchesFilters(
     movie: Movie,
     filters: MovieFilters
@@ -392,6 +519,19 @@ private fun movieMatchesFilters(
 
     if (year !in filters.startYear..filters.endYear) {
         return false
+    }
+
+    if (!matchesOriginalLanguage(movie, filters)) {
+        return false
+    }
+
+    if (filters.minRating > 0.0) {
+        val rating = movie.rating.toDoubleOrNull()
+            ?: return false
+
+        if (rating < filters.minRating) {
+            return false
+        }
     }
 
     if (filters.genreIds.isEmpty()) {
@@ -590,21 +730,67 @@ enum class ContentCategory {
     DOCUMENTARIES
 }
 
+enum class AppearanceMode {
+    DARK,
+    LIGHT,
+    SYSTEM
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        val preferences = getSharedPreferences(
+            "screenroulette_settings",
+            MODE_PRIVATE
+        )
+
         setContent {
-            ScreenRouletteTheme {
-                ScreenRouletteScreen()
+            var appearance by remember {
+                mutableStateOf(
+                    runCatching {
+                        AppearanceMode.valueOf(
+                            preferences.getString(
+                                "appearance",
+                                "SYSTEM"
+                            ) ?: "SYSTEM"
+                        )
+                    }.getOrDefault(AppearanceMode.SYSTEM)
+                )
+            }
+
+            val systemDark = isSystemInDarkTheme()
+
+            val useDarkTheme = when (appearance) {
+                AppearanceMode.DARK -> true
+                AppearanceMode.LIGHT -> false
+                AppearanceMode.SYSTEM -> systemDark
+            }
+
+            ScreenRouletteTheme(
+                darkTheme = useDarkTheme,
+                dynamicColor = false
+            ) {
+                ScreenRouletteScreen(
+                    appearance = appearance,
+                    onAppearanceChange = { selected ->
+                        appearance = selected
+                        preferences.edit()
+                            .putString("appearance", selected.name)
+                            .apply()
+                    }
+                )
             }
         }
     }
 }
 
 @Composable
-fun ScreenRouletteScreen() {
+fun ScreenRouletteScreen(
+    appearance: AppearanceMode,
+    onAppearanceChange: (AppearanceMode) -> Unit
+) {
     var selectedCategory by remember {
         mutableStateOf(ContentCategory.FILMS)
     }
@@ -626,6 +812,19 @@ fun ScreenRouletteScreen() {
         mutableStateOf(defaultFilters)
     }
 
+    val categoryGenres = when (selectedCategory) {
+        ContentCategory.FILMS -> movieGenres
+        ContentCategory.TV_SERIES -> tvGenreNames
+            .map { (id, name) -> MovieGenre(id, name) }
+            .sortedBy { it.name }
+        ContentCategory.DOCUMENTARIES ->
+            listOf(MovieGenre(99, "Documentary"))
+    }
+
+    val savedCategoryFilters = remember {
+        mutableStateMapOf<ContentCategory, MovieFilters>()
+    }
+
     var selectedGenres by remember {
         mutableStateOf(emptySet<Int>())
     }
@@ -640,6 +839,41 @@ fun ScreenRouletteScreen() {
 
     var endYearText by remember {
         mutableStateOf(currentYear.toString())
+    }
+
+    var minimumRating by remember {
+        mutableFloatStateOf(0f)
+    }
+
+    var originalLanguageFilter by remember {
+        mutableStateOf("all")
+    }
+
+    var streamingRegion by remember { mutableStateOf("") }
+    var streamingProviderId by remember { mutableIntStateOf(0) }
+    var streamingProviders by remember {
+        mutableStateOf<List<StreamingProvider>>(emptyList())
+    }
+    var streamingProvidersLoading by remember { mutableStateOf(false) }
+    var streamingProvidersError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(selectedCategory, streamingRegion) {
+        streamingProviders = emptyList()
+        streamingProvidersError = null
+        if (streamingRegion.isNotBlank()) {
+            streamingProvidersLoading = true
+            try {
+                streamingProviders = fetchStreamingProviders(
+                    selectedCategory, streamingRegion
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                streamingProvidersError = e.message
+            } finally {
+                streamingProvidersLoading = false
+            }
+        }
     }
 
     var filtersExpanded by remember {
@@ -749,7 +983,54 @@ fun ScreenRouletteScreen() {
                     style = MaterialTheme.typography.headlineLarge
                 )
 
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(8.dp))
+
+                Text(
+                    "Appearance",
+                    style = MaterialTheme.typography.labelLarge
+                )
+
+                Row(
+                    horizontalArrangement =
+                        Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    listOf(
+                        AppearanceMode.DARK to "Dark",
+                        AppearanceMode.LIGHT to "Light",
+                        AppearanceMode.SYSTEM to "System"
+                    ).forEach { (mode, label) ->
+                        if (appearance == mode) {
+                            Button(
+                                onClick = {
+                                    onAppearanceChange(mode)
+                                },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(
+                                    horizontal = 4.dp,
+                                    vertical = 8.dp
+                                )
+                            ) {
+                                Text(label)
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = {
+                                    onAppearanceChange(mode)
+                                },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(
+                                    horizontal = 4.dp,
+                                    vertical = 8.dp
+                                )
+                            ) {
+                                Text(label)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
 
                 Text("Five films. One decision.")
 
@@ -777,10 +1058,30 @@ fun ScreenRouletteScreen() {
                             Button(
                                 onClick = {
                                     if (selectedCategory != category) {
+                                        val restored =
+                                            savedCategoryFilters[category]
+                                                ?: defaultFilters
+
                                         selectedCategory = category
+                                        activeFilters = restored
+                                        selectedGenres =
+                                            restored.genreIds
+                                        matchAll = restored.matchAll
+                                        minimumRating =
+                                            restored.minRating.toFloat()
+                                        originalLanguageFilter =
+                                            restored.originalLanguageFilter
+                                        streamingRegion = restored.streamingRegion
+                                        streamingProviderId = restored.streamingProviderId
+                                        startYearText =
+                                            restored.startYear.toString()
+                                        endYearText =
+                                            restored.endYear.toString()
+
                                         seenIds = emptySet()
                                         recommendations = emptyList()
                                         navigationStack.clear()
+                                        filtersExpanded = false
                                     }
                                 },
                                 modifier = Modifier.weight(1f),
@@ -798,10 +1099,30 @@ fun ScreenRouletteScreen() {
                             OutlinedButton(
                                 onClick = {
                                     if (selectedCategory != category) {
+                                        val restored =
+                                            savedCategoryFilters[category]
+                                                ?: defaultFilters
+
                                         selectedCategory = category
+                                        activeFilters = restored
+                                        selectedGenres =
+                                            restored.genreIds
+                                        matchAll = restored.matchAll
+                                        minimumRating =
+                                            restored.minRating.toFloat()
+                                        originalLanguageFilter =
+                                            restored.originalLanguageFilter
+                                        streamingRegion = restored.streamingRegion
+                                        streamingProviderId = restored.streamingProviderId
+                                        startYearText =
+                                            restored.startYear.toString()
+                                        endYearText =
+                                            restored.endYear.toString()
+
                                         seenIds = emptySet()
                                         recommendations = emptyList()
                                         navigationStack.clear()
+                                        filtersExpanded = false
                                     }
                                 },
                                 modifier = Modifier.weight(1f),
@@ -881,7 +1202,14 @@ fun ScreenRouletteScreen() {
                     ) {
                         item {
                             Text(
-                                "Genres",
+                                when (selectedCategory) {
+                                    ContentCategory.FILMS ->
+                                        "Film Genres"
+                                    ContentCategory.TV_SERIES ->
+                                        "TV Series Genres"
+                                    ContentCategory.DOCUMENTARIES ->
+                                        "Documentary"
+                                },
                                 style = MaterialTheme
                                     .typography.titleLarge
                             )
@@ -891,11 +1219,14 @@ fun ScreenRouletteScreen() {
                             )
                         }
 
-                        items(movieGenres) { genre ->
+                        items(categoryGenres) { genre ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable {
+                                    .clickable(
+                                        enabled = selectedCategory !=
+                                            ContentCategory.DOCUMENTARIES
+                                    ) {
                                         selectedGenres =
                                             if (
                                                 genre.id in selectedGenres
@@ -909,8 +1240,16 @@ fun ScreenRouletteScreen() {
                                     Alignment.CenterVertically
                             ) {
                                 Checkbox(
-                                    checked =
-                                        genre.id in selectedGenres,
+                                    enabled = selectedCategory !=
+                                        ContentCategory.DOCUMENTARIES,
+                                    checked = if (
+                                        selectedCategory ==
+                                        ContentCategory.DOCUMENTARIES
+                                    ) {
+                                        true
+                                    } else {
+                                        genre.id in selectedGenres
+                                    },
                                     onCheckedChange = { checked ->
                                         selectedGenres =
                                             if (checked) {
@@ -922,6 +1261,21 @@ fun ScreenRouletteScreen() {
                                 )
 
                                 Text(genre.name)
+                            }
+                        }
+
+                        item {
+                            if (
+                                selectedCategory ==
+                                ContentCategory.DOCUMENTARIES
+                            ) {
+                                Text(
+                                    "Documentary is automatically selected."
+                                )
+                            } else {
+                                Text(
+                                    "Choose Match Any or Match All below."
+                                )
                             }
                         }
 
@@ -965,6 +1319,169 @@ fun ScreenRouletteScreen() {
                                     }
                                 )
                             }
+                        }
+
+                        item {
+                            Spacer(Modifier.height(8.dp))
+
+                            Text(
+                                "Original Language",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+
+                            listOf(
+                                "all" to "All languages",
+                                "en" to "English only",
+                                "international" to "Non-English only"
+                            ).forEach { (value, label) ->
+                                Row(
+                                    verticalAlignment =
+                                        Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected =
+                                            originalLanguageFilter == value,
+                                        onClick = {
+                                            originalLanguageFilter = value
+                                        }
+                                    )
+
+                                    Text(
+                                        text = label,
+                                        modifier = Modifier.clickable {
+                                            originalLanguageFilter = value
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        item {
+                            Text(
+                                "Streaming Availability",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Text(
+                                "Worldwide discovery is unrestricted. Select a country and " +
+                                    "a service to filter titles included with streaming.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            var countryMenuOpen by remember { mutableStateOf(false) }
+                            Box {
+                                OutlinedButton(onClick = { countryMenuOpen = true }) {
+                                    Text(streamingCountries.firstOrNull {
+                                        it.first == streamingRegion
+                                    }?.second ?: "Choose country")
+                                }
+                                DropdownMenu(
+                                    expanded = countryMenuOpen,
+                                    onDismissRequest = { countryMenuOpen = false }
+                                ) {
+                                    streamingCountries.forEach { (code, name) ->
+                                        DropdownMenuItem(
+                                            text = { Text(name) },
+                                            onClick = {
+                                                streamingRegion = code
+                                                streamingProviderId = 0
+                                                countryMenuOpen = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                            if (streamingRegion.isNotBlank()) {
+                                if (streamingProvidersLoading) {
+                                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                                }
+                                streamingProvidersError?.let {
+                                    Text("Providers unavailable: $it")
+                                }
+                                var providerMenuOpen by remember { mutableStateOf(false) }
+                                Box {
+                                    OutlinedButton(
+                                        onClick = { providerMenuOpen = true },
+                                        enabled = !streamingProvidersLoading
+                                    ) {
+                                        Text(
+                                            streamingProviders.firstOrNull {
+                                                it.id == streamingProviderId
+                                            }?.name ?: "Any service (no provider filter)"
+                                        )
+                                    }
+                                    DropdownMenu(
+                                        expanded = providerMenuOpen,
+                                        onDismissRequest = { providerMenuOpen = false }
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("Any service (no provider filter)") },
+                                            onClick = {
+                                                streamingProviderId = 0
+                                                providerMenuOpen = false
+                                            }
+                                        )
+                                        streamingProviders.forEach { provider ->
+                                            DropdownMenuItem(
+                                                text = { Text(provider.name) },
+                                                onClick = {
+                                                    streamingProviderId = provider.id
+                                                    providerMenuOpen = false
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                                Text(
+                                    if (streamingProviderId == 0)
+                                        "Country selected for availability details; " +
+                                            "recommendations are not restricted by service."
+                                    else
+                                        "Recommendations must be listed for subscription, " +
+                                            "free or ad-supported streaming on this service.",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+
+                        item {
+                            Spacer(Modifier.height(8.dp))
+
+                            Text(
+                                "Minimum TMDB Rating",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+
+                            Text(
+                                String.format(
+                                    Locale.US,
+                                    "%.1f / 10",
+                                    minimumRating
+                                ),
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+
+                            Slider(
+                                value = minimumRating,
+                                onValueChange = { minimumRating = it },
+                                valueRange = 0f..9f,
+                                steps = 17,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            Text(
+                                if (minimumRating == 0f) {
+                                    "No minimum rating"
+                                } else {
+                                    "Only titles rated at least " +
+                                        String.format(
+                                            Locale.US,
+                                            "%.1f",
+                                            minimumRating
+                                        ) +
+                                        " on TMDB"
+                                },
+                                style = MaterialTheme.typography.bodySmall
+                            )
                         }
 
                         item {
@@ -1031,6 +1548,10 @@ fun ScreenRouletteScreen() {
                                 matchAll = false
                                 startYearText = "1990"
                                 endYearText = currentYear.toString()
+                                minimumRating = 0f
+                                originalLanguageFilter = "all"
+                                streamingRegion = ""
+                                streamingProviderId = 0
                             },
                             modifier = Modifier.weight(1f)
                         ) {
@@ -1055,8 +1576,16 @@ fun ScreenRouletteScreen() {
                                         genreIds = selectedGenres.toSet(),
                                         matchAll = matchAll,
                                         startYear = from,
-                                        endYear = to
+                                        endYear = to,
+                                        minRating = minimumRating.toDouble(),
+                                        originalLanguageFilter =
+                                            originalLanguageFilter,
+                                        streamingRegion = streamingRegion,
+                                        streamingProviderId = streamingProviderId
                                     )
+
+                                    savedCategoryFilters[selectedCategory] =
+                                        newFilters
 
                                     seenIds = emptySet()
                                     recommendations = emptyList()
@@ -1131,6 +1660,7 @@ fun ScreenRouletteScreen() {
             MovieDetailsScreen(
                 movie = selectedMovie,
                 category = selectedCategory,
+                streamingRegion = activeFilters.streamingRegion,
                 padding = innerPadding,
                 onBack = { goBack() },
                 onMovieSelected = {
@@ -1210,6 +1740,11 @@ private fun MovieCard(
 
                 Text("TMDB: ${movie.rating}/10")
 
+                    Text(
+                        "Original Language: ${movie.originalLanguage}",
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
                 Text(
                     "Genres: ${titleGenreLabel(movie, category)}",
                     style = MaterialTheme.typography.bodySmall
@@ -1229,10 +1764,40 @@ private fun MovieCard(
 private fun MovieDetailsScreen(
     movie: Movie,
     category: ContentCategory,
+    streamingRegion: String,
     padding: PaddingValues,
     onBack: () -> Unit,
     onMovieSelected: (Movie) -> Unit
 ) {
+    var streamingAvailability by remember(movie.id, streamingRegion) {
+        mutableStateOf<StreamingAvailability?>(null)
+    }
+    var streamingError by remember(movie.id, streamingRegion) {
+        mutableStateOf<String?>(null)
+    }
+    var streamingLoading by remember(movie.id, streamingRegion) {
+        mutableStateOf(false)
+    }
+
+    LaunchedEffect(movie.id, category, streamingRegion) {
+        streamingAvailability = null
+        streamingError = null
+        if (streamingRegion.isNotBlank()) {
+            streamingLoading = true
+            try {
+                streamingAvailability = fetchStreamingAvailability(
+                    movie.id, category, streamingRegion
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                streamingError = e.message
+            } finally {
+                streamingLoading = false
+            }
+        }
+    }
+
     var similarMovies by remember(movie.id) {
         mutableStateOf<List<Movie>>(emptyList())
     }
@@ -1357,6 +1922,41 @@ private fun MovieDetailsScreen(
                                 .colorScheme.error
                         )
                     }
+                }
+            }
+
+            item {
+                Text(
+                    "Streaming availability",
+                    style = MaterialTheme.typography.titleLarge
+                )
+                if (streamingRegion.isBlank()) {
+                    Text("Worldwide discovery. Select a country in Filters " +
+                        "to see streaming availability.")
+                } else if (streamingLoading) {
+                    CircularProgressIndicator()
+                } else if (streamingError != null) {
+                    Text("Availability unavailable: $streamingError")
+                } else {
+                    val availability = streamingAvailability ?: StreamingAvailability()
+                    Text("Country: " + (
+                        streamingCountries.firstOrNull { it.first == streamingRegion }
+                            ?.second ?: streamingRegion
+                    ))
+                    Text("Subscription / free / ads: " +
+                        availability.subscription.ifEmpty { listOf("Not listed") }
+                            .joinToString(", "))
+                    Text("Rent: " +
+                        availability.rent.ifEmpty { listOf("Not listed") }
+                            .joinToString(", "))
+                    Text("Buy: " +
+                        availability.buy.ifEmpty { listOf("Not listed") }
+                            .joinToString(", "))
+                    Text(
+                        "Provider information supplied by TMDB/JustWatch; " +
+                            "availability may change.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
             }
 
