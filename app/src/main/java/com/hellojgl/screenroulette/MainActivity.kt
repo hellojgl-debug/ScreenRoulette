@@ -1270,7 +1270,7 @@ private fun RouletteSplashScreen() {
         Spacer(Modifier.height(34.dp))
 
         Text(
-            text = "Five films. One decision.",
+            text = "Winners know what to watch.",
             style = MaterialTheme.typography.titleMedium,
             color = Color.White
         )
@@ -1330,18 +1330,32 @@ class MainActivity : ComponentActivity() {
                 darkTheme = useDarkTheme,
                 dynamicColor = false
             ) {
-                if (showSplash) {
-                    RouletteSplashScreen()
-                } else {
+                Box(
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    // Keep the main screen composed immediately.
+                    // Its initial TMDB request starts during the splash.
                     ScreenRouletteScreen(
-                    appearance = appearance,
-                    onAppearanceChange = { selected ->
-                        appearance = selected
-                        preferences.edit()
-                            .putString("appearance", selected.name)
-                            .apply()
+                        appearance = appearance,
+                        onAppearanceChange = { selected ->
+                            appearance = selected
+                            preferences.edit()
+                                .putString("appearance", selected.name)
+                                .apply()
+                        }
+                    )
+
+                    // The static splash covers the main screen
+                    // without delaying its initial data loading.
+                    if (showSplash) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color(0xFF10291F))
+                        ) {
+                            RouletteSplashScreen()
+                        }
                     }
-                )
                 }
             }
         }
@@ -1724,7 +1738,7 @@ fun ScreenRouletteScreen(
 
                 Spacer(Modifier.height(12.dp))
 
-                Text("Five films. One decision.")
+                Text("Winners know what to watch.")
 
                 Spacer(Modifier.height(12.dp))
 
