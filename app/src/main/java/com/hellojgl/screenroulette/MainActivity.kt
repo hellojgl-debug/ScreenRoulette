@@ -207,6 +207,183 @@ private fun parseMovies(json: JSONObject): List<Movie> {
     }
 }
 
+
+private val tvGenreNames = mapOf(
+    10759 to "Action & Adventure",
+    16 to "Animation",
+    35 to "Comedy",
+    80 to "Crime",
+    99 to "Documentary",
+    18 to "Drama",
+    10751 to "Family",
+    10762 to "Kids",
+    9648 to "Mystery",
+    10763 to "News",
+    10764 to "Reality",
+    10765 to "Sci-Fi & Fantasy",
+    10766 to "Soap",
+    10767 to "Talk",
+    10768 to "War & Politics",
+    37 to "Western"
+)
+
+private fun parseTitles(
+    json: JSONObject,
+    category: ContentCategory
+): List<Movie> {
+    if (category != ContentCategory.TV_SERIES) {
+        return parseMovies(json)
+    }
+
+    val results = json.getJSONArray("results")
+
+    return buildList {
+        for (i in 0 until results.length()) {
+            val item = results.getJSONObject(i)
+            val date = item.optString("first_air_date")
+            val genres = mutableSetOf<Int>()
+            val array = item.optJSONArray("genre_ids")
+
+            if (array != null) {
+                for (j in 0 until array.length()) {
+                    genres.add(array.getInt(j))
+                }
+            }
+
+            val votes = item.optInt("vote_count")
+            val rating = if (votes > 0) {
+                String.format(
+                    Locale.US,
+                    "%.1f",
+                    item.optDouble("vote_average")
+                )
+            } else {
+                "N/A"
+            }
+
+            add(
+                Movie(
+                    id = item.getInt("id"),
+                    title = item.optString("name", "Unknown"),
+                    year = date.take(4).ifBlank { "N/A" },
+                    rating = rating,
+                    overview = item.optString("overview", ""),
+                    posterPath = item.optString("poster_path")
+                        .takeIf { it.isNotBlank() && it != "null" },
+                    genreIds = genres
+                )
+            )
+        }
+    }
+}
+
+private fun titleGenreLabel(
+    movie: Movie,
+    category: ContentCategory
+): String {
+    val names = if (category == ContentCategory.TV_SERIES) {
+        tvGenreNames
+    } else {
+        genreNames
+    }
+
+    return movie.genreIds
+        .mapNotNull { names[it] }
+        .sorted()
+        .joinToString(", ")
+        .ifBlank { "Genres unavailable" }
+}
+
+private suspend fun fetchCategoryRecommendations(
+    category: ContentCategory,
+    excludedIds: Set<Int>,
+    filters: MovieFilters
+): List<Movie> {
+    val isTV = category == ContentCategory.TV_SERIES
+
+    val effectiveGenres = if (
+        category == ContentCategory.DOCUMENTARIES
+    ) {
+        setOf(99)
+    } else {
+        filters.genreIds
+    }
+
+    val effectiveFilters = filters.copy(
+        genreIds = effectiveGenres,
+        matchAll = if (
+            category == ContentCategory.DOCUMENTARIES
+        ) false else filters.matchAll
+    )
+
+    val parameters = mutableMapOf(
+        "language" to "en-US",
+        "sort_by" to "popularity.desc",
+        "vote_count.gte" to "100"
+    )
+
+    if (isTV) {
+        parameters["first_air_date.gte"] =
+            "${filters.startYear}-01-01"
+        parameters["first_air_date.lte"] =
+            "${filters.endYear}-12-31"
+    } else {
+        parameters["primary_release_date.gte"] =
+            "${filters.startYear}-01-01"
+        parameters["primary_release_date.lte"] =
+            "${filters.endYear}-12-31"
+    }
+
+    if (effectiveGenres.isNotEmpty()) {
+        parameters["with_genres"] = effectiveGenres
+            .sorted()
+            .joinToString(
+                if (effectiveFilters.matchAll) "," else "|"
+            )
+    }
+
+    val endpoint = if (isTV) "discover/tv" else "discover/movie"
+
+    val first = tmdbRequest(
+        endpoint,
+        parameters + ("page" to "1")
+    )
+
+    val totalPages = first.optInt("total_pages", 1)
+        .coerceIn(1, 500)
+
+    val candidates = mutableListOf<Movie>()
+    val candidateIds = mutableSetOf<Int>()
+
+    fun collect(response: JSONObject) {
+        parseTitles(response, category).forEach { title ->
+            if (
+                title.id !in excludedIds &&
+                title.id !in candidateIds &&
+                movieMatchesFilters(title, effectiveFilters)
+            ) {
+                candidates.add(title)
+                candidateIds.add(title.id)
+            }
+        }
+    }
+
+    collect(first)
+
+    for (page in (2..totalPages).shuffled().take(24)) {
+        if (candidates.size >= 30) break
+
+        collect(
+            tmdbRequest(
+                endpoint,
+                parameters + ("page" to page.toString())
+            )
+        )
+    }
+
+    return candidates.shuffled().take(5)
+}
+
 private fun movieMatchesFilters(
     movie: Movie,
     filters: MovieFilters
@@ -300,22 +477,32 @@ private suspend fun fetchRecommendations(
         .take(5)
 }
 
-private suspend fun fetchSimilarMovies(movieId: Int): List<Movie> {
+private suspend fun fetchSimilarMovies(
+    movieId: Int,
+    category: ContentCategory
+): List<Movie> {
     val response = tmdbRequest(
-        "movie/$movieId/similar",
+        if (category == ContentCategory.TV_SERIES) {
+            "tv/$movieId/similar"
+        } else {
+            "movie/$movieId/similar"
+        },
         mapOf(
             "language" to "en-US",
             "page" to "1"
         )
     )
 
-    return parseMovies(response)
+    return parseTitles(response, category)
         .filter { it.id != movieId }
         .distinctBy { it.id }
         .take(3)
 }
 
-private suspend fun fetchImdbInfo(movieId: Int): ImdbInfo =
+private suspend fun fetchImdbInfo(
+    movieId: Int,
+    category: ContentCategory
+): ImdbInfo =
     withContext(Dispatchers.IO) {
         val omdbKey = BuildConfig.OMDB_API_KEY
 
@@ -324,7 +511,11 @@ private suspend fun fetchImdbInfo(movieId: Int): ImdbInfo =
         }
 
         val externalIds = tmdbRequest(
-            "movie/$movieId/external_ids"
+            if (category == ContentCategory.TV_SERIES) {
+                "tv/$movieId/external_ids"
+            } else {
+                "movie/$movieId/external_ids"
+            }
         )
 
         val imdbId = externalIds.optString("imdb_id")
@@ -393,6 +584,12 @@ private suspend fun fetchImdbInfo(movieId: Int): ImdbInfo =
         }
     }
 
+enum class ContentCategory {
+    FILMS,
+    TV_SERIES,
+    DOCUMENTARIES
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -408,6 +605,10 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ScreenRouletteScreen() {
+    var selectedCategory by remember {
+        mutableStateOf(ContentCategory.FILMS)
+    }
+
     val currentYear = remember {
         Calendar.getInstance().get(Calendar.YEAR)
     }
@@ -487,20 +688,31 @@ fun ScreenRouletteScreen() {
 
     // A new request is triggered whenever the active
     // filters or roll number changes.
-    LaunchedEffect(activeFilters, rollNumber) {
+    LaunchedEffect(selectedCategory, activeFilters, rollNumber) {
         loading = true
         error = null
         recommendations = emptyList()
 
         try {
-            val newMovies = fetchRecommendations(
+            val newMovies = fetchCategoryRecommendations(
+                category = selectedCategory,
                 excludedIds = seenIds,
                 filters = activeFilters
             )
 
             // Final verification before displaying films.
             val verifiedMovies = newMovies.filter {
-                movieMatchesFilters(it, activeFilters)
+                movieMatchesFilters(
+                    it,
+                    if (selectedCategory == ContentCategory.DOCUMENTARIES) {
+                        activeFilters.copy(
+                            genreIds = setOf(99),
+                            matchAll = false
+                        )
+                    } else {
+                        activeFilters
+                    }
+                )
             }
 
             if (verifiedMovies.isEmpty()) {
@@ -544,12 +756,100 @@ fun ScreenRouletteScreen() {
                 Spacer(Modifier.height(12.dp))
 
                 Text(
+                    "What would you like to watch?",
+                    style = MaterialTheme.typography.titleMedium
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val categories = listOf(
+                        ContentCategory.FILMS to "Films",
+                        ContentCategory.TV_SERIES to "TV Series",
+                        ContentCategory.DOCUMENTARIES to "Documentaries"
+                    )
+
+                    categories.forEach { (category, label) ->
+                        if (selectedCategory == category) {
+                            Button(
+                                onClick = {
+                                    if (selectedCategory != category) {
+                                        selectedCategory = category
+                                        seenIds = emptySet()
+                                        recommendations = emptyList()
+                                        navigationStack.clear()
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(
+                                    horizontal = 4.dp,
+                                    vertical = 10.dp
+                                )
+                            ) {
+                                Text(
+                                    label,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = {
+                                    if (selectedCategory != category) {
+                                        selectedCategory = category
+                                        seenIds = emptySet()
+                                        recommendations = emptyList()
+                                        navigationStack.clear()
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(
+                                    horizontal = 4.dp,
+                                    vertical = 10.dp
+                                )
+                            ) {
+                                Text(
+                                    label,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (selectedCategory != ContentCategory.FILMS) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        if (selectedCategory == ContentCategory.TV_SERIES) {
+                            "Showing television series from TMDB."
+                        } else {
+                            "Showing documentary films from TMDB."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                Text(
                     "Active Filters",
                     style = MaterialTheme.typography.titleSmall
                 )
 
                 Text(
-                    activeFilterLabel(activeFilters),
+                    if (selectedCategory == ContentCategory.DOCUMENTARIES) {
+                        activeFilterLabel(
+                            activeFilters.copy(
+                                genreIds = setOf(99),
+                                matchAll = false
+                            )
+                        )
+                    } else {
+                        activeFilterLabel(activeFilters)
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -716,55 +1016,63 @@ fun ScreenRouletteScreen() {
                             }
                         }
 
-                        item {
-                            Spacer(Modifier.height(8.dp))
 
-                            Button(
-                                onClick = {
-                                    val from =
-                                        startYearText.toIntOrNull()
+                    }
 
-                                    val to =
-                                        endYearText.toIntOrNull()
+                    Spacer(Modifier.height(8.dp))
 
-                                    if (
-                                        from == null ||
-                                        to == null ||
-                                        from < 1874 ||
-                                        to > currentYear ||
-                                        from > to
-                                    ) {
-                                        error =
-                                            "Enter a valid year range " +
-                                                    "between 1874 and $currentYear."
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                selectedGenres = emptySet()
+                                matchAll = false
+                                startYearText = "1990"
+                                endYearText = currentYear.toString()
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Clear Filters")
+                        }
+
+                        Button(
+                            onClick = {
+                                val from = startYearText.toIntOrNull()
+                                val to = endYearText.toIntOrNull()
+
+                                if (
+                                    from == null ||
+                                    to == null ||
+                                    from < 1874 ||
+                                    to > currentYear ||
+                                    from > to
+                                ) {
+                                    error = "Enter a valid year range between 1874 and $currentYear."
+                                } else {
+                                    val newFilters = MovieFilters(
+                                        genreIds = selectedGenres.toSet(),
+                                        matchAll = matchAll,
+                                        startYear = from,
+                                        endYear = to
+                                    )
+
+                                    seenIds = emptySet()
+                                    recommendations = emptyList()
+                                    filtersExpanded = false
+
+                                    if (newFilters == activeFilters) {
+                                        rollNumber++
                                     } else {
-                                        val newFilters = MovieFilters(
-                                            genreIds =
-                                                selectedGenres.toSet(),
-                                            matchAll = matchAll,
-                                            startYear = from,
-                                            endYear = to
-                                        )
-
-                                        // Clear the previous session
-                                        // before applying new filters.
-                                        seenIds = emptySet()
-                                        recommendations = emptyList()
-
-                                        filtersExpanded = false
-
-                                        if (newFilters == activeFilters) {
-                                            rollNumber++
-                                        } else {
-                                            activeFilters = newFilters
-                                        }
+                                        activeFilters = newFilters
                                     }
-                                },
-                                enabled = !loading,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text("Apply Filters")
-                            }
+                                }
+                            },
+                            enabled = !loading,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Apply Filters")
                         }
                     }
                 }
@@ -812,7 +1120,7 @@ fun ScreenRouletteScreen() {
                             recommendations,
                             key = { it.id }
                         ) { movie ->
-                            MovieCard(movie) {
+                            MovieCard(movie, selectedCategory) {
                                 navigationStack.add(movie)
                             }
                         }
@@ -822,6 +1130,7 @@ fun ScreenRouletteScreen() {
         } else {
             MovieDetailsScreen(
                 movie = selectedMovie,
+                category = selectedCategory,
                 padding = innerPadding,
                 onBack = { goBack() },
                 onMovieSelected = {
@@ -867,6 +1176,7 @@ private fun MoviePoster(
 @Composable
 private fun MovieCard(
     movie: Movie,
+    category: ContentCategory,
     onClick: () -> Unit
 ) {
     Card(
@@ -896,12 +1206,12 @@ private fun MovieCard(
                     style = MaterialTheme.typography.titleMedium
                 )
 
-                Text("Year: ${movie.year}")
+                Text(if (category == ContentCategory.TV_SERIES) "First aired: ${movie.year}" else "Year: ${movie.year}")
 
                 Text("TMDB: ${movie.rating}/10")
 
                 Text(
-                    "Genres: ${genreLabel(movie)}",
+                    "Genres: ${titleGenreLabel(movie, category)}",
                     style = MaterialTheme.typography.bodySmall
                 )
 
@@ -918,6 +1228,7 @@ private fun MovieCard(
 @Composable
 private fun MovieDetailsScreen(
     movie: Movie,
+    category: ContentCategory,
     padding: PaddingValues,
     onBack: () -> Unit,
     onMovieSelected: (Movie) -> Unit
@@ -951,7 +1262,7 @@ private fun MovieDetailsScreen(
         similarError = null
 
         try {
-            similarMovies = fetchSimilarMovies(movie.id)
+            similarMovies = fetchSimilarMovies(movie.id, category)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -967,7 +1278,7 @@ private fun MovieDetailsScreen(
         ratingsError = null
 
         try {
-            imdbInfo = fetchImdbInfo(movie.id)
+            imdbInfo = fetchImdbInfo(movie.id, category)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -1022,7 +1333,7 @@ private fun MovieDetailsScreen(
                 )
 
                 Text(
-                    "Genres: ${genreLabel(movie)}"
+                    "Genres: ${titleGenreLabel(movie, category)}"
                 )
             }
 
@@ -1091,7 +1402,7 @@ private fun MovieDetailsScreen(
                     similarMovies,
                     key = { it.id }
                 ) { similar ->
-                    MovieCard(similar) {
+                    MovieCard(similar, category) {
                         onMovieSelected(similar)
                     }
                 }
