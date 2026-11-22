@@ -1274,6 +1274,43 @@ fun ScreenRouletteScreen(
                     color = MaterialTheme.colorScheme.primary
                 )
 
+                // Step 41: Worldwide Discovery shortcut
+                if (
+                    activeFilters.streamingRegion.isNotBlank() ||
+                    activeFilters.streamingProviderId != 0
+                ) {
+                    Spacer(Modifier.height(8.dp))
+
+                    OutlinedButton(
+                        onClick = {
+                            val updated = activeFilters.copy(
+                                streamingRegion = "",
+                                streamingProviderId = 0
+                            )
+
+                            activeFilters = updated
+                            streamingRegion = ""
+                            streamingProviderId = 0
+
+                            savedCategoryFilters[selectedCategory] = updated
+                            saveCategoryFilters(
+                                context,
+                                selectedCategory,
+                                updated
+                            )
+
+                            seenIds = emptySet()
+                            recommendations = emptyList()
+                            navigationStack.clear()
+                            filtersExpanded = false
+                        },
+                        enabled = !loading,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("🌍 Switch to Worldwide Discovery")
+                    }
+                }
+
                 Spacer(Modifier.height(12.dp))
 
                 OutlinedButton(
