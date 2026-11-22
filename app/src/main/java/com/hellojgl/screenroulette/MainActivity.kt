@@ -1,6 +1,7 @@
 package com.hellojgl.screenroulette
 
 import android.os.Bundle
+import android.content.Context
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -15,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
@@ -29,6 +31,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import org.json.JSONArray
 import java.util.Calendar
 import java.util.Locale
 
@@ -91,6 +94,87 @@ private val genreNames = movieGenres.associate {
 }
 
 private val httpClient = OkHttpClient()
+
+
+private fun saveCategoryFilters(
+    context: Context,
+    category: ContentCategory,
+    filters: MovieFilters
+) {
+    val data = JSONObject().apply {
+        put("genreIds", JSONArray(filters.genreIds.sorted()))
+        put("matchAll", filters.matchAll)
+        put("startYear", filters.startYear)
+        put("endYear", filters.endYear)
+        put("minRating", filters.minRating)
+        put("originalLanguageFilter", filters.originalLanguageFilter)
+        put("streamingRegion", filters.streamingRegion)
+        put("streamingProviderId", filters.streamingProviderId)
+    }
+
+    context.getSharedPreferences(
+        "screenroulette_settings",
+        Context.MODE_PRIVATE
+    ).edit()
+        .putString("filters_${category.name}", data.toString())
+        .apply()
+}
+
+private fun loadCategoryFilters(
+    context: Context,
+    category: ContentCategory,
+    fallback: MovieFilters
+): MovieFilters {
+    val raw = context.getSharedPreferences(
+        "screenroulette_settings",
+        Context.MODE_PRIVATE
+    ).getString("filters_${category.name}", null) ?: return fallback
+
+    return runCatching {
+        val data = JSONObject(raw)
+        val genres = data.optJSONArray("genreIds")
+        val genreIds = mutableSetOf<Int>()
+
+        if (genres != null) {
+            for (i in 0 until genres.length()) {
+                genreIds.add(genres.getInt(i))
+            }
+        }
+
+        val from = data.optInt("startYear", fallback.startYear)
+        val to = data.optInt("endYear", fallback.endYear)
+
+        require(
+            from >= 1874 &&
+            from <= to &&
+            to <= Calendar.getInstance().get(Calendar.YEAR)
+        )
+
+        val region = data.optString("streamingRegion", "")
+            .takeIf { code ->
+                streamingCountries.any { it.first == code }
+            } ?: ""
+
+        MovieFilters(
+            genreIds = genreIds,
+            matchAll = data.optBoolean("matchAll", false),
+            startYear = from,
+            endYear = to,
+            minRating = data.optDouble("minRating", 0.0)
+                .coerceIn(0.0, 9.0),
+            originalLanguageFilter =
+                data.optString("originalLanguageFilter", "all")
+                    .takeIf {
+                        it in setOf("all", "en", "international")
+                    } ?: "all",
+            streamingRegion = region,
+            streamingProviderId =
+                if (region.isBlank()) 0
+                else data.optInt("streamingProviderId", 0)
+                    .coerceAtLeast(0)
+        )
+    }.getOrDefault(fallback)
+}
 
 private val streamingCountries = listOf(
     "" to "Worldwide (no restriction)",
@@ -791,6 +875,7 @@ fun ScreenRouletteScreen(
     appearance: AppearanceMode,
     onAppearanceChange: (AppearanceMode) -> Unit
 ) {
+    val context = LocalContext.current
     var selectedCategory by remember {
         mutableStateOf(ContentCategory.FILMS)
     }
@@ -808,8 +893,16 @@ fun ScreenRouletteScreen(
         )
     }
 
+    val initialFilters = remember(context, defaultFilters) {
+        loadCategoryFilters(
+            context,
+            ContentCategory.FILMS,
+            defaultFilters
+        )
+    }
+
     var activeFilters by remember {
-        mutableStateOf(defaultFilters)
+        mutableStateOf(initialFilters)
     }
 
     val categoryGenres = when (selectedCategory) {
@@ -821,36 +914,42 @@ fun ScreenRouletteScreen(
             listOf(MovieGenre(99, "Documentary"))
     }
 
-    val savedCategoryFilters = remember {
-        mutableStateMapOf<ContentCategory, MovieFilters>()
+    val savedCategoryFilters = remember(context, defaultFilters) {
+        mutableStateMapOf<ContentCategory, MovieFilters>().apply {
+            ContentCategory.values().forEach { category ->
+                this[category] = loadCategoryFilters(
+                    context, category, defaultFilters
+                )
+            }
+        }
     }
 
     var selectedGenres by remember {
-        mutableStateOf(emptySet<Int>())
+        mutableStateOf(initialFilters.genreIds)
     }
 
     var matchAll by remember {
-        mutableStateOf(false)
+        mutableStateOf(initialFilters.matchAll)
     }
 
     var startYearText by remember {
-        mutableStateOf("1990")
+        mutableStateOf(initialFilters.startYear.toString())
     }
 
     var endYearText by remember {
-        mutableStateOf(currentYear.toString())
+        mutableStateOf(initialFilters.endYear.toString())
     }
 
     var minimumRating by remember {
-        mutableFloatStateOf(0f)
+        mutableFloatStateOf(initialFilters.minRating.toFloat())
     }
 
     var originalLanguageFilter by remember {
-        mutableStateOf("all")
+        mutableStateOf(initialFilters.originalLanguageFilter)
     }
 
-    var streamingRegion by remember { mutableStateOf("") }
-    var streamingProviderId by remember { mutableIntStateOf(0) }
+    var streamingRegion by remember { mutableStateOf(initialFilters.streamingRegion) }
+    var streamingProviderId by remember { mutableIntStateOf(initialFilters.streamingProviderId) }
     var streamingProviders by remember {
         mutableStateOf<List<StreamingProvider>>(emptyList())
     }
@@ -1586,6 +1685,11 @@ fun ScreenRouletteScreen(
 
                                     savedCategoryFilters[selectedCategory] =
                                         newFilters
+                                    saveCategoryFilters(
+                                        context,
+                                        selectedCategory,
+                                        newFilters
+                                    )
 
                                     seenIds = emptySet()
                                     recommendations = emptyList()
