@@ -2091,11 +2091,26 @@ fun ScreenRouletteScreen(
                 }
 
                 if (filtersExpanded) {
-                    OutlinedButton(
+                    Button(
                         onClick = { showYearEditor = true },
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
                     ) {
-                        Text("Release years · $startYearText–$endYearText")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Release years",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                            Text(
+                                "$startYearText–$endYearText",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
                     }
 
                     LazyColumn(
