@@ -9,6 +9,7 @@ class RecommendationFiltersTest {
     private fun movie(
         year: String = "2020",
         rating: String = "8.0",
+        imdbRating: String? = "8.0",
         genres: Set<Int> = setOf(28, 35),
         language: String = "en"
     ) = Movie(
@@ -19,7 +20,8 @@ class RecommendationFiltersTest {
         overview = "",
         posterPath = null,
         genreIds = genres,
-        originalLanguage = language
+        originalLanguage = language,
+        imdbRating = imdbRating
     )
 
     private fun filters(
@@ -57,10 +59,22 @@ class RecommendationFiltersTest {
     fun filmBelowMinimumRatingIsRejected() {
         assertFalse(
             movieMatchesFilters(
-                movie(rating = "5.5"),
+                movie(rating = "9.0", imdbRating = "5.5"),
                 filters(minRating = 7.0)
             )
         )
+    }
+
+    @Test
+    fun highImdbRatingMatchesEvenWithALowTmdbRating() {
+        assertTrue(movieMatchesFilters(movie(rating = "5.5", imdbRating = "8.5"), filters(minRating = 7.0)))
+    }
+
+    @Test
+    fun unavailableImdbRatingOnlyMatchesWhenThereIsNoMinimum() {
+        val title = movie(rating = "9.0", imdbRating = "N/A")
+        assertTrue(movieMatchesFilters(title, filters()))
+        assertFalse(movieMatchesFilters(title, filters(minRating = 7.0)))
     }
 
     @Test
