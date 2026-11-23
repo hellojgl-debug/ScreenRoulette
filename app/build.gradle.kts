@@ -1,23 +1,7 @@
-import java.util.Properties
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
-
-// Load API credentials from local.properties
-val localProperties = Properties().apply {
-    val propertiesFile = rootProject.file("local.properties")
-
-    if (propertiesFile.exists()) {
-        propertiesFile.inputStream().use {
-            load(it)
-        }
-    }
-}
-
-val tmdbApiKey = localProperties.getProperty("TMDB_API_KEY", "")
-val omdbApiKey = localProperties.getProperty("OMDB_API_KEY", "")
 
 android {
     namespace = "com.hellojgl.screenroulette"
@@ -30,35 +14,23 @@ android {
         applicationId = "com.hellojgl.screenroulette"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // TMDB API Read Access Token
         buildConfigField(
             "String",
-            "TMDB_API_KEY",
-            "\"$tmdbApiKey\""
-        )
-
-        // OMDb API key
-        buildConfigField(
-            "String",
-            "OMDB_API_KEY",
-            "\"$omdbApiKey\""
+            "BACKEND_BASE_URL",
+            "\"https://screenroulette-backend.screenroulette-release-20kyxr.workers.dev\""
         )
     }
 
     buildTypes {
         release {
+            // Scoped R8 optimization breaks Kotlin access checks during OkHttp startup.
             optimization {
-                enable = true
-                packageScope = setOf(
-                    "androidx.**",
-                    "kotlin.**",
-                    "kotlinx.**"
-                )
+                enable = false
             }
         }
     }
