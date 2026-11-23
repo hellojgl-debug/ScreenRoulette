@@ -10,6 +10,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -43,6 +44,7 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -1647,18 +1649,15 @@ fun ScreenRouletteScreen(
         mutableStateOf<String?>(null)
     }
 
-    val navigationStack = remember {
-        mutableStateListOf<Movie>()
-    }
-
-    val selectedMovie = navigationStack.lastOrNull()
+    var screenHistory by remember { mutableStateOf(ScreenHistory()) }
+    val page = screenHistory.current
+    val selectedDetails = page as? AppPage.Details
 
     val watchlist = remember(context) {
         mutableStateListOf<WatchlistEntry>().apply {
             addAll(loadWatchlist(context))
         }
     }
-    var showWatchlist by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
 
     fun toggleWatchlist(movie: Movie, category: ContentCategory) {
@@ -1676,21 +1675,34 @@ fun ScreenRouletteScreen(
     val recommendationListState = rememberLazyListState()
 
     fun goBack() {
-        if (navigationStack.isNotEmpty()) {
-            navigationStack.removeAt(
-                navigationStack.lastIndex
-            )
-        }
+        screenHistory = screenHistory.goBack()
     }
 
-    BackHandler(
-        enabled = navigationStack.isNotEmpty() || showWatchlist
-    ) {
-        if (navigationStack.isNotEmpty()) {
-            goBack()
-        } else {
-            showWatchlist = false
+    fun openDetails(movie: Movie, category: ContentCategory) {
+        screenHistory = screenHistory.open(AppPage.Details(movie, category))
+    }
+
+    BackHandler(enabled = screenHistory.canGoBack, onBack = ::goBack)
+
+    val allowScreenSwipe = (screenHistory.canGoBack || screenHistory.canGoForward) &&
+        (page != AppPage.Discover || !filtersExpanded)
+    val screenSwipe = if (allowScreenSwipe) {
+        Modifier.pointerInput(Unit) {
+            val threshold = 72.dp.toPx()
+            var distance = 0f
+            detectHorizontalDragGestures(
+                onDragStart = { distance = 0f },
+                onHorizontalDrag = { _, amount -> distance += amount },
+                onDragEnd = {
+                    when {
+                        distance >= threshold -> goBack()
+                        distance <= -threshold -> screenHistory = screenHistory.goForward()
+                    }
+                }
+            )
         }
+    } else {
+        Modifier
     }
 
     // A new request is triggered whenever the active
@@ -1827,17 +1839,17 @@ fun ScreenRouletteScreen(
     }
 
     Scaffold(
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier.fillMaxSize().then(screenSwipe)
     ) { innerPadding ->
 
-        if (selectedMovie == null && showWatchlist) {
+        if (page == AppPage.Watchlist) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
                     .padding(16.dp)
             ) {
-                TextButton(onClick = { showWatchlist = false }) {
+                TextButton(onClick = ::goBack) {
                     Text("← Back to recommendations")
                 }
                 Text(
@@ -1876,11 +1888,7 @@ fun ScreenRouletteScreen(
                                             Arrangement.spacedBy(8.dp)
                                     ) {
                                         Button(onClick = {
-                                            selectedCategory = entry.category
-                                            activeFilters =
-                                                savedCategoryFilters[entry.category]
-                                                    ?: defaultFilters(entry.category)
-                                            navigationStack.add(entry.movie)
+                                            openDetails(entry.movie, entry.category)
                                         }) {
                                             Text("View details")
                                         }
@@ -1898,7 +1906,7 @@ fun ScreenRouletteScreen(
                     }
                 }
             }
-        } else if (selectedMovie == null) {
+        } else if (selectedDetails == null) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1916,7 +1924,7 @@ fun ScreenRouletteScreen(
                         style = MaterialTheme.typography.headlineSmall
                     )
                     OutlinedButton(
-                        onClick = { showWatchlist = true },
+                        onClick = { screenHistory = screenHistory.open(AppPage.Watchlist) },
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Text("Watchlist (${watchlist.size})")
@@ -1969,7 +1977,7 @@ fun ScreenRouletteScreen(
                                         seenIds = emptySet()
                                         shuffleRecommendations = false
                                         recommendations = emptyList()
-                                        navigationStack.clear()
+                                        screenHistory = ScreenHistory()
                                         filtersExpanded = false
                                     }
                                 },
@@ -2011,7 +2019,7 @@ fun ScreenRouletteScreen(
                                         seenIds = emptySet()
                                         shuffleRecommendations = false
                                         recommendations = emptyList()
-                                        navigationStack.clear()
+                                        screenHistory = ScreenHistory()
                                         filtersExpanded = false
                                     }
                                 },
@@ -2075,7 +2083,7 @@ fun ScreenRouletteScreen(
                                 seenIds = emptySet()
                                 shuffleRecommendations = false
                                 recommendations = emptyList()
-                                navigationStack.clear()
+                                screenHistory = ScreenHistory()
                                 filtersExpanded = false
                             },
                             enabled = !loading,
@@ -2462,7 +2470,7 @@ fun ScreenRouletteScreen(
                                 shuffleRecommendations = false
                                 recommendations = emptyList()
                                 spinHistory.clear()
-                                navigationStack.clear()
+                                screenHistory = ScreenHistory()
                                 filtersExpanded = false
 
                                 if (activeFilters == reset) {
@@ -2633,29 +2641,26 @@ fun ScreenRouletteScreen(
                                 category = selectedCategory,
                                 streamingRegion = activeFilters.streamingRegion
                             ) {
-                                navigationStack.add(movie)
+                                openDetails(movie, selectedCategory)
                             }
                         }
                     }
                 }
             }
         } else {
+            val movie = selectedDetails.movie
+            val category = selectedDetails.category
             MovieDetailsScreen(
-                movie = selectedMovie,
-                category = selectedCategory,
-                streamingRegion = activeFilters.streamingRegion,
+                movie = movie,
+                category = category,
+                streamingRegion = savedCategoryFilters[category]?.streamingRegion.orEmpty(),
                 padding = innerPadding,
-                onBack = { goBack() },
+                onBack = ::goBack,
                 isWatchlisted = watchlist.any {
-                    it.movie.id == selectedMovie.id &&
-                        it.category == selectedCategory
+                    it.movie.id == movie.id && it.category == category
                 },
-                onToggleWatchlist = {
-                    toggleWatchlist(selectedMovie, selectedCategory)
-                },
-                onMovieSelected = {
-                    navigationStack.add(it)
-                }
+                onToggleWatchlist = { toggleWatchlist(movie, category) },
+                onMovieSelected = { openDetails(it, category) }
             )
         }
     }
@@ -2958,51 +2963,50 @@ private fun MovieCard(
 }
 
 @Composable
-private fun WatchTrailerButton(movie: Movie, category: ContentCategory) {
+private fun WatchTrailerButton(
+    movie: Movie,
+    category: ContentCategory,
+    onTrailerFound: (String) -> Unit
+) {
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
-    var trailerId by remember { mutableStateOf<String?>(null) }
 
-    val videoId = trailerId
-    if (videoId != null) {
-        BackHandler { trailerId = null }
-        YouTubeTrailerPlayer(videoId, onClose = { trailerId = null })
-    } else {
-        OutlinedButton(
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !loading,
-            onClick = {
-                loading = true
-                message = null
-                scope.launch {
-                    try {
-                        trailerId = fetchYouTubeTrailer(movie, category)
-                        if (trailerId == null) {
-                            message = "No YouTube trailer is listed for this title."
-                        }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
-                        message = "Couldn’t load the trailer. Try again."
-                    } finally {
-                        loading = false
+    OutlinedButton(
+        modifier = Modifier.fillMaxWidth(),
+        enabled = !loading,
+        onClick = {
+            loading = true
+            message = null
+            scope.launch {
+                try {
+                    val trailer = fetchYouTubeTrailer(movie, category)
+                    if (trailer == null) {
+                        message = "No YouTube trailer is listed for this title."
+                    } else {
+                        onTrailerFound(trailer)
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    message = "Couldn’t load the trailer. Try again."
+                } finally {
+                    loading = false
                 }
             }
-        ) {
-            Text(if (loading) "Finding trailer…" else "Watch trailer")
         }
+    ) {
+        Text(if (loading) "Finding trailer…" else "Watch trailer")
+    }
 
-        message?.let {
-            Text(
-                it,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.semantics {
-                    liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite
-                }
-            )
-        }
+    message?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.semantics {
+                liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite
+            }
+        )
     }
 }
 
@@ -3017,6 +3021,9 @@ private fun MovieDetailsScreen(
     onToggleWatchlist: () -> Unit,
     onMovieSelected: (Movie) -> Unit
 ) {
+    var trailerId by remember(movie.id, category) { mutableStateOf<String?>(null) }
+    trailerId?.let { YouTubeTrailerPlayer(it, onClose = { trailerId = null }) }
+
     var streamingAvailability by remember(movie.id, streamingRegion) {
         mutableStateOf<StreamingAvailability?>(null)
     }
@@ -3147,7 +3154,7 @@ private fun MovieDetailsScreen(
             }
 
             item(key = "trailer-${category.name}-${movie.id}") {
-                WatchTrailerButton(movie, category)
+                WatchTrailerButton(movie, category) { trailerId = it }
             }
 
             item {
