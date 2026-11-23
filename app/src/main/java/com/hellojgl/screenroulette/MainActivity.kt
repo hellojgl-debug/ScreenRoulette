@@ -58,8 +58,6 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -152,8 +150,7 @@ data class Movie(
     val posterPath: String?,
     val genreIds: Set<Int>,
     val originalLanguage: String = "",
-    val releaseDate: String = "",
-    val imdbRating: String? = null
+    val releaseDate: String = ""
 )
 
 // Step 46: Persistent Watchlist
@@ -232,11 +229,6 @@ private fun saveWatchlist(
     ).edit().putString("entries", array.toString()).apply()
 }
 
-data class ImdbInfo(
-    val imdbRating: String = "N/A",
-    val rottenTomatoes: String = "N/A"
-)
-
 data class MovieGenre(
     val id: Int,
     val name: String
@@ -250,7 +242,8 @@ data class MovieFilters(
     val minRating: Double = 0.0,
     val originalLanguageFilter: String = "all",
     val streamingRegion: String = "",
-    val streamingProviderId: Int = 0
+    val streamingProviderId: Int = 0,
+    val maxRating: Double = 10.0
 )
 
 private const val DYSTOPIAN_GENRE_ID = -1
@@ -259,7 +252,6 @@ private const val DEFAULT_RECOMMENDATION_COUNT = 3
 private const val MAX_RECOMMENDATION_COUNT = 5
 private const val RECOMMENDATION_COUNT_KEY = "recommendation_count"
 private const val MAX_DISCOVERY_PAGES = 500
-private const val MAX_IMDB_LOOKUPS = 20
 
 private val movieGenres = listOf(
     MovieGenre(28, "Action"),
@@ -304,6 +296,33 @@ private const val EARLIEST_RELEASE_YEAR = 1870
 
 private const val TMDB_CACHE_DURATION_MS = 10 * 60 * 1000L
 
+private class TmdbBusyException : java.io.IOException(
+    "The movie service is busy. Wait a minute before trying again."
+)
+
+private class TmdbRequestBudget {
+    private val requests = ArrayDeque<Long>()
+    private var pausedUntil = 0L
+
+    @Synchronized
+    fun reserve() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        while (requests.firstOrNull()?.let { now - it >= 60_000L } == true) {
+            requests.removeFirst()
+        }
+        if (now < pausedUntil || requests.size >= 48) throw TmdbBusyException()
+        requests.addLast(now)
+    }
+
+    @Synchronized
+    fun pause(seconds: Long) {
+        pausedUntil = maxOf(pausedUntil, android.os.SystemClock.elapsedRealtime() + seconds * 1000)
+    }
+}
+
+private val discoveryRequestBudget = TmdbRequestBudget()
+private val trailerRequestBudget = TmdbRequestBudget()
+
 private fun shouldCacheTmdb(path: String): Boolean {
     return path.startsWith("watch/providers/") ||
         path.endsWith("/watch/providers") ||
@@ -324,6 +343,7 @@ private fun saveCategoryFilters(
         put("startYear", filters.startYear)
         put("endYear", filters.endYear)
         put("minRating", filters.minRating)
+        put("maxRating", filters.maxRating)
         put("originalLanguageFilter", filters.originalLanguageFilter)
         put("streamingRegion", filters.streamingRegion)
         put("streamingProviderId", filters.streamingProviderId)
@@ -372,13 +392,18 @@ private fun loadCategoryFilters(
                 streamingCountries.any { it.first == code }
             } ?: ""
 
+        val maximum = data.optDouble("maxRating", 10.0).takeIf { it.isFinite() }
+            ?.let(::normalizeRatingBound) ?: 10.0
+        val minimum = data.optDouble("minRating", 0.0).takeIf { it.isFinite() }
+            ?.let(::normalizeRatingBound)?.coerceAtMost(maximum) ?: 0.0
+
         MovieFilters(
             genreIds = genreIds,
             matchAll = data.optBoolean("matchAll", false),
             startYear = from,
             endYear = to,
-            minRating = data.optDouble("minRating", 0.0)
-                .coerceIn(0.0, 9.0),
+            minRating = minimum,
+            maxRating = maximum,
             originalLanguageFilter =
                 data.optString("originalLanguageFilter", "all")
                     .takeIf {
@@ -510,7 +535,7 @@ private fun activeFilterLabel(filters: MovieFilters): String {
 
     return "$genres | $matching | " +
             "${filters.startYear}-${filters.endYear} | " +
-            "IMDb ≥ ${String.format(Locale.US, "%.1f", filters.minRating)} | " +
+            String.format(Locale.US, "TMDB %.1f–%.1f | ", filters.minRating, filters.maxRating) +
             (when (filters.originalLanguageFilter) {
                 "en" -> "English only"
                 "international" -> "Non-English only"
@@ -554,7 +579,14 @@ private suspend fun tmdbRequest(
         .url(url)
         .build()
 
+    val budget = if (path.endsWith("/videos")) trailerRequestBudget else discoveryRequestBudget
+    budget.reserve()
     httpClient.newCall(request).execute().use { response ->
+        if (response.code == 429) {
+            val pauseSeconds = response.header("Retry-After")?.toLongOrNull()?.coerceIn(1, 300) ?: 60
+            budget.pause(pauseSeconds)
+            throw TmdbBusyException()
+        }
         if (!response.isSuccessful) {
             throw Exception("TMDB HTTP ${response.code}")
         }
@@ -726,7 +758,6 @@ private suspend fun fetchCategoryRecommendations(
     category: ContentCategory,
     excludedIds: Set<Int>,
     filters: MovieFilters,
-    newestFirst: Boolean,
     resultLimit: Int
 ): List<Movie> {
     val standardGenres = filters.genreIds - DYSTOPIAN_GENRE_ID
@@ -735,7 +766,7 @@ private suspend fun fetchCategoryRecommendations(
         !filters.matchAll
 
     if (!needsSeparateQueries) {
-        return fetchDiscoveryRecommendations(category, excludedIds, filters, newestFirst, resultLimit)
+        return fetchDiscoveryRecommendations(category, excludedIds, filters, resultLimit)
     }
 
     // TMDB combines genre and keyword parameters with AND. Query both sides for Match Any.
@@ -743,29 +774,22 @@ private suspend fun fetchCategoryRecommendations(
         listOf(standardGenres, setOf(DYSTOPIAN_GENRE_ID)).map { genres ->
             async {
                 fetchDiscoveryRecommendations(
-                    category, excludedIds, filters.copy(genreIds = genres), newestFirst, resultLimit,
-                    extraPageLimit = 20,
-                    ratingLookupLimit = MAX_IMDB_LOOKUPS / 2
+                    category, excludedIds, filters.copy(genreIds = genres), resultLimit,
+                    extraPageLimit = 6
                 )
             }
         }.awaitAll().flatten().distinctBy { it.id }
     }
 
-    return if (newestFirst) {
-        candidates.sortedByDescending { it.releaseDate }.take(resultLimit)
-    } else {
-        selectSpinRecommendations(candidates, excludedIds, filters, resultLimit)
-    }
+    return selectSpinRecommendations(candidates, excludedIds, filters, resultLimit)
 }
 
 private suspend fun fetchDiscoveryRecommendations(
     category: ContentCategory,
     excludedIds: Set<Int>,
     filters: MovieFilters,
-    newestFirst: Boolean,
     resultLimit: Int,
-    extraPageLimit: Int = 40,
-    ratingLookupLimit: Int = MAX_IMDB_LOOKUPS
+    extraPageLimit: Int = 12
 ): List<Movie> {
     val diagnosticStart = android.os.SystemClock.elapsedRealtime()
     var diagnosticPages = 0
@@ -792,13 +816,17 @@ private suspend fun fetchDiscoveryRecommendations(
 
     val dateParameter = if (isTV) "first_air_date" else "primary_release_date"
     val endDate = LocalDate.of(filters.endYear, 12, 31)
-    val dateCutoff = if (newestFirst) minOf(endDate, LocalDate.now()) else endDate
     val parameters = mutableMapOf(
         "language" to "en-US",
-        "sort_by" to "$dateParameter.${if (newestFirst) "desc" else "asc"}",
+        "sort_by" to "$dateParameter.asc",
         "$dateParameter.gte" to "${filters.startYear}-01-01",
-        "$dateParameter.lte" to dateCutoff.toString()
+        "$dateParameter.lte" to endDate.toString()
     )
+
+    if (filters.minRating > 0.0) {
+        parameters["vote_average.gte"] = formatTmdbRatingParameter(filters.minRating)
+        parameters["vote_count.gte"] = "1"
+    }
 
     if (filters.originalLanguageFilter == "en") {
         parameters["with_original_language"] = "en"
@@ -836,7 +864,6 @@ private suspend fun fetchDiscoveryRecommendations(
 
     val candidates = mutableListOf<Movie>()
     val candidateIds = mutableSetOf<Int>()
-    val discoveryFilters = effectiveFilters.copy(minRating = 0.0)
 
     fun collect(response: JSONObject) {
         diagnosticPages++
@@ -851,7 +878,7 @@ private suspend fun fetchDiscoveryRecommendations(
             if (
                 title.id !in excludedIds &&
                 title.id !in candidateIds &&
-                movieMatchesFilters(title, discoveryFilters)
+                movieMatchesFilters(title, effectiveFilters)
             ) {
                 candidates.add(title)
                 candidateIds.add(title.id)
@@ -863,6 +890,8 @@ private suspend fun fetchDiscoveryRecommendations(
         try {
             tmdbRequest(endpoint, query + ("page" to page.toString()))
         } catch (e: CancellationException) {
+            throw e
+        } catch (e: TmdbBusyException) {
             throw e
         } catch (e: Exception) {
             android.util.Log.w("ScreenRouletteSpin", "TMDB discovery page $page failed", e)
@@ -877,14 +906,8 @@ private suspend fun fetchDiscoveryRecommendations(
         }
     }
 
-    val targetCandidateCount = if (newestFirst && filters.minRating == 0.0) {
-        resultLimit
-    } else {
-        20
-    }
-    if (newestFirst) collect(first)
-
-    if (!newestFirst && totalPages >= MAX_DISCOVERY_PAGES && filters.startYear < filters.endYear) {
+    val targetCandidateCount = 20
+    if (totalPages >= MAX_DISCOVERY_PAGES && filters.startYear < filters.endYear) {
         // Sample years throughout the range when TMDB caps the full query at 500 pages.
         val years = (filters.startYear..filters.endYear).shuffled().take(extraPageLimit / 2)
         for (batch in years.chunked(4)) {
@@ -907,11 +930,7 @@ private suspend fun fetchDiscoveryRecommendations(
         }
         if (candidates.isEmpty()) collect(first)
     } else {
-        val pages = if (newestFirst) {
-            (2..totalPages.coerceAtMost(MAX_DISCOVERY_PAGES)).take(extraPageLimit)
-        } else {
-            randomDiscoveryPages(totalPages).take(extraPageLimit)
-        }
+        val pages = randomDiscoveryPages(totalPages).take(extraPageLimit)
 
         for (batch in pages.chunked(4)) {
             if (candidates.size >= targetCandidateCount) break
@@ -947,64 +966,12 @@ private suspend fun fetchDiscoveryRecommendations(
         )
     }
 
-    val eligible = if (filters.minRating > 0.0) {
-        val pool = if (newestFirst) candidates else candidates.shuffled()
-        rateDiscoveryCandidates(
-            pool.take(ratingLookupLimit),
-            category,
-            effectiveFilters,
-            if (newestFirst) resultLimit else maxOf(resultLimit, 8)
-        )
-    } else {
-        candidates
-    }
-
-    if (newestFirst) return eligible.take(resultLimit)
-
     return selectSpinRecommendations(
-        candidates = eligible,
+        candidates = candidates,
         excludedIds = emptySet(),
         filters = effectiveFilters,
         limit = resultLimit
     )
-}
-
-private suspend fun rateDiscoveryCandidates(
-    candidates: List<Movie>,
-    category: ContentCategory,
-    filters: MovieFilters,
-    targetCount: Int
-): List<Movie> = kotlinx.coroutines.coroutineScope {
-    val eligible = mutableListOf<Movie>()
-    var successfulLookups = 0
-    var lookupFailed = false
-    for (batch in candidates.chunked(4)) {
-        if (eligible.size >= targetCount) break
-        val rated = batch.map { movie ->
-            async {
-                try {
-                    movie.copy(imdbRating = fetchImdbInfo(movie.id, category).imdbRating)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    null
-                }
-            }
-        }.awaitAll()
-
-        for (movie in rated) {
-            if (movie == null) {
-                lookupFailed = true
-            } else {
-                successfulLookups++
-                if (movieMatchesFilters(movie, filters)) eligible.add(movie)
-            }
-        }
-    }
-    if (successfulLookups == 0 && lookupFailed) {
-        throw java.io.IOException("IMDb ratings are temporarily unavailable. Try again.")
-    }
-    eligible
 }
 
 internal fun randomDiscoveryPages(
@@ -1147,100 +1114,6 @@ private suspend fun fetchSimilarMovies(
         .distinctBy { it.id }
         .take(3)
 }
-
-private data class CachedImdbInfo(val value: ImdbInfo, val savedAt: Long)
-
-private val imdbInfoCache = java.util.concurrent.ConcurrentHashMap<Pair<Boolean, Int>, CachedImdbInfo>()
-private val imdbLookupSlots = Semaphore(4)
-
-private suspend fun fetchImdbInfo(movieId: Int, category: ContentCategory): ImdbInfo {
-    val isTv = category == ContentCategory.TV_SERIES
-    val key = isTv to movieId
-    fun cached() = imdbInfoCache[key]?.takeIf {
-        android.os.SystemClock.elapsedRealtime() - it.savedAt < TMDB_CACHE_DURATION_MS
-    }?.value
-
-    return cached() ?: imdbLookupSlots.withPermit {
-        cached() ?: requestImdbInfo(movieId, isTv).also {
-            imdbInfoCache[key] = CachedImdbInfo(it, android.os.SystemClock.elapsedRealtime())
-        }
-    }
-}
-
-private suspend fun requestImdbInfo(movieId: Int, isTv: Boolean): ImdbInfo =
-    withContext(Dispatchers.IO) {
-        val externalIds = tmdbRequest(
-            if (isTv) {
-                "tv/$movieId/external_ids"
-            } else {
-                "movie/$movieId/external_ids"
-            }
-        )
-
-        val imdbId = externalIds.optString("imdb_id")
-
-        if (imdbId.isBlank() || imdbId == "null") {
-            return@withContext ImdbInfo()
-        }
-
-        val url = "${BuildConfig.BACKEND_BASE_URL}/api/omdb"
-            .toHttpUrl()
-            .newBuilder()
-            .addQueryParameter("i", imdbId)
-            .build()
-
-        val request = Request.Builder()
-            .url(url)
-            .build()
-
-        httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw Exception("OMDb HTTP ${response.code}")
-            }
-
-            val body = response.body?.string()
-                ?: throw Exception("Empty OMDb response")
-
-            val json = JSONObject(body)
-
-            if (json.optString("Response") == "False") {
-                val error = json.optString("Error")
-                if (error.equals("Movie not found!", ignoreCase = true)) {
-                    return@withContext ImdbInfo()
-                }
-                throw java.io.IOException("IMDb ratings are temporarily unavailable.")
-            }
-
-            val imdb = json.optString("imdbRating")
-                .takeIf { imdbScore(it) != null } ?: "N/A"
-
-            var rotten = "N/A"
-
-            val ratings = json.optJSONArray("Ratings")
-
-            if (ratings != null) {
-                for (i in 0 until ratings.length()) {
-                    val item = ratings.getJSONObject(i)
-
-                    if (
-                        item.optString("Source") ==
-                        "Rotten Tomatoes"
-                    ) {
-                        rotten = item.optString(
-                            "Value",
-                            "N/A"
-                        )
-                        break
-                    }
-                }
-            }
-
-            ImdbInfo(
-                imdbRating = imdb,
-                rottenTomatoes = rotten
-            )
-        }
-    }
 
 enum class ContentCategory {
     FILMS,
@@ -1649,8 +1522,8 @@ fun ScreenRouletteScreen(
         mutableStateOf(initialFilters.endYear.toString())
     }
 
-    var minimumRating by remember {
-        mutableFloatStateOf(initialFilters.minRating.toFloat())
+    var ratingRange by remember {
+        mutableStateOf(initialFilters.minRating.toFloat()..initialFilters.maxRating.toFloat())
     }
 
     var originalLanguageFilter by remember {
@@ -1708,7 +1581,6 @@ fun ScreenRouletteScreen(
         mutableIntStateOf(0)
     }
 
-    var openingRecommendations by remember { mutableStateOf(true) }
     var shuffleRecommendations by remember {
         mutableStateOf(false)
     }
@@ -1782,8 +1654,6 @@ fun ScreenRouletteScreen(
     LaunchedEffect(selectedCategory, activeFilters, activeRecommendationCount, rollNumber) {
         val spinStart = android.os.SystemClock.elapsedRealtime()
         var spinRetried = false
-        val newestFirst = selectedCategory == ContentCategory.FILMS && openingRecommendations
-        openingRecommendations = false
         val previousResults = recommendations
 
         loading = true
@@ -1795,7 +1665,6 @@ fun ScreenRouletteScreen(
                 category = selectedCategory,
                 excludedIds = seenIds,
                 filters = activeFilters,
-                newestFirst = newestFirst,
                 resultLimit = activeRecommendationCount
             )
 
@@ -1822,7 +1691,6 @@ fun ScreenRouletteScreen(
                     category = selectedCategory,
                     excludedIds = emptySet(),
                     filters = activeFilters,
-                    newestFirst = newestFirst,
                     resultLimit = activeRecommendationCount
                 )
 
@@ -2035,8 +1903,7 @@ fun ScreenRouletteScreen(
                                         selectedGenres =
                                             restored.genreIds
                                         matchAll = restored.matchAll
-                                        minimumRating =
-                                            restored.minRating.toFloat()
+                                        ratingRange = restored.minRating.toFloat()..restored.maxRating.toFloat()
                                         originalLanguageFilter =
                                             restored.originalLanguageFilter
                                         streamingRegion = restored.streamingRegion
@@ -2077,8 +1944,7 @@ fun ScreenRouletteScreen(
                                         selectedGenres =
                                             restored.genreIds
                                         matchAll = restored.matchAll
-                                        minimumRating =
-                                            restored.minRating.toFloat()
+                                        ratingRange = restored.minRating.toFloat()..restored.maxRating.toFloat()
                                         originalLanguageFilter =
                                             restored.originalLanguageFilter
                                         streamingRegion = restored.streamingRegion
@@ -2467,41 +2333,27 @@ fun ScreenRouletteScreen(
                             Spacer(Modifier.height(8.dp))
 
                             Text(
-                                "Minimum IMDb rating",
+                                "TMDB rating range",
                                 style = MaterialTheme.typography.titleMedium
                             )
 
                             Text(
                                 String.format(
                                     Locale.US,
-                                    "%.1f / 10",
-                                    minimumRating
+                                    "%.1f – %.1f / 10",
+                                    ratingRange.start,
+                                    ratingRange.endInclusive
                                 ),
                                 style = MaterialTheme.typography.titleLarge,
                                 color = MaterialTheme.colorScheme.primary
                             )
 
-                            Slider(
-                                value = minimumRating,
-                                onValueChange = { minimumRating = it },
-                                valueRange = 0f..9f,
-                                steps = 17,
+                            RangeSlider(
+                                value = ratingRange,
+                                onValueChange = { ratingRange = it },
+                                valueRange = 0f..10f,
+                                steps = 19,
                                 modifier = Modifier.fillMaxWidth()
-                            )
-
-                            Text(
-                                if (minimumRating == 0f) {
-                                    "No minimum rating"
-                                } else {
-                                    "Only titles rated at least " +
-                                        String.format(
-                                            Locale.US,
-                                            "%.1f",
-                                            minimumRating
-                                        ) +
-                                        " on IMDb"
-                                },
-                                style = MaterialTheme.typography.bodySmall
                             )
                         }
 
@@ -2524,7 +2376,7 @@ fun ScreenRouletteScreen(
                                 matchAll = reset.matchAll
                                 startYearText = reset.startYear.toString()
                                 endYearText = reset.endYear.toString()
-                                minimumRating = reset.minRating.toFloat()
+                                ratingRange = reset.minRating.toFloat()..reset.maxRating.toFloat()
                                 originalLanguageFilter =
                                     reset.originalLanguageFilter
                                 streamingRegion = reset.streamingRegion
@@ -2584,7 +2436,8 @@ fun ScreenRouletteScreen(
                                         matchAll = matchAll,
                                         startYear = from,
                                         endYear = to,
-                                        minRating = minimumRating.toDouble(),
+                                        minRating = normalizeRatingBound(ratingRange.start.toDouble()),
+                                        maxRating = normalizeRatingBound(ratingRange.endInclusive.toDouble()),
                                         originalLanguageFilter =
                                             originalLanguageFilter,
                                         streamingRegion = streamingRegion,
@@ -2800,7 +2653,7 @@ private fun AboutScreenRouletteDialog(onDismiss: () -> Unit) {
                     modifier = Modifier.width(120.dp)
                 )
                 Text("This product uses the TMDB API but is not endorsed or certified by TMDB.")
-                Text("Streaming availability is supplied by TMDB and JustWatch. IMDb and Rotten Tomatoes ratings are retrieved through OMDb.")
+                Text("Streaming availability is supplied by TMDB and JustWatch. Ratings are supplied by TMDB.")
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
@@ -2883,21 +2736,6 @@ private fun MovieCard(
     streamingRegion: String,
     onClick: () -> Unit
 ) {
-    var cardImdbRating by remember(movie.id, category, movie.imdbRating) {
-        mutableStateOf(movie.imdbRating)
-    }
-    LaunchedEffect(movie.id, category, movie.imdbRating) {
-        if (movie.imdbRating == null) {
-            cardImdbRating = try {
-                fetchImdbInfo(movie.id, category).imdbRating
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                "N/A"
-            }
-        }
-    }
-
     var availability by remember(
         movie.id, category, streamingRegion
     ) {
@@ -2984,11 +2822,7 @@ private fun MovieCard(
                         color = MaterialTheme.colorScheme.primaryContainer
                     ) {
                         Text(
-                            text = when (val rating = cardImdbRating) {
-                                null -> "IMDb …"
-                                "N/A" -> "IMDb N/A"
-                                else -> "IMDb $rating/10"
-                            },
+                            text = if (movie.rating == "N/A") "TMDB N/A" else "TMDB ${movie.rating}/10",
                             modifier = Modifier.padding(
                                 horizontal = 8.dp,
                                 vertical = 4.dp
@@ -3079,8 +2913,12 @@ private fun WatchTrailerButton(
                     }
                 } catch (e: CancellationException) {
                     throw e
-                } catch (_: Exception) {
-                    message = "Couldn’t load the trailer. Try again."
+                } catch (e: Exception) {
+                    message = if (e is TmdbBusyException) {
+                        "Trailer lookup is busy. Try again in a minute."
+                    } else {
+                        "Couldn’t load the trailer. Try again."
+                    }
                 } finally {
                     loading = false
                 }
@@ -3148,23 +2986,11 @@ private fun MovieDetailsScreen(
         mutableStateOf<List<Movie>>(emptyList())
     }
 
-    var imdbInfo by remember(movie.id) {
-        mutableStateOf(ImdbInfo())
-    }
-
     var similarLoading by remember(movie.id) {
         mutableStateOf(true)
     }
 
-    var ratingsLoading by remember(movie.id) {
-        mutableStateOf(true)
-    }
-
     var similarError by remember(movie.id) {
-        mutableStateOf<String?>(null)
-    }
-
-    var ratingsError by remember(movie.id) {
         mutableStateOf<String?>(null)
     }
 
@@ -3181,22 +3007,6 @@ private fun MovieDetailsScreen(
                 e.message ?: "Unable to load similar films"
         } finally {
             similarLoading = false
-        }
-    }
-
-    LaunchedEffect(movie.id) {
-        ratingsLoading = true
-        ratingsError = null
-
-        try {
-            imdbInfo = fetchImdbInfo(movie.id, category)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            ratingsError =
-                e.message ?: "Unable to load ratings"
-        } finally {
-            ratingsLoading = false
         }
     }
 
@@ -3269,29 +3079,10 @@ private fun MovieDetailsScreen(
             }
 
             item {
-                if (ratingsLoading) {
-                    Text(
-                        "Loading IMDb and Rotten Tomatoes ratings..."
-                    )
-                } else {
-                    Text(
-                        if (imdbInfo.imdbRating == "N/A") "IMDb: N/A"
-                        else "IMDb: ${imdbInfo.imdbRating}/10"
-                    )
-
-                    Text(
-                        "Rotten Tomatoes: " +
-                                imdbInfo.rottenTomatoes
-                    )
-
-                    ratingsError?.let {
-                        Text(
-                            "Ratings unavailable: $it",
-                            color = MaterialTheme
-                                .colorScheme.error
-                        )
-                    }
-                }
+                Text(
+                    if (movie.rating == "N/A") "TMDB: N/A"
+                    else "TMDB: ${movie.rating}/10"
+                )
             }
 
             item {

@@ -13,8 +13,14 @@ internal fun matchesOriginalLanguage(
     }
 }
 
-internal fun imdbScore(value: String?): Double? =
-    value?.toDoubleOrNull()?.takeIf { it in 0.0..10.0 }
+internal fun normalizeRatingBound(value: Double): Double =
+    kotlin.math.round(value.coerceIn(0.0, 10.0) * 100) / 100
+
+internal fun formatTmdbRatingParameter(value: Double): String =
+    String.format(java.util.Locale.US, "%.2f", normalizeRatingBound(value))
+
+internal fun tmdbScore(value: String): Double? =
+    value.toDoubleOrNull()?.takeIf { it in 0.0..10.0 }
 
 internal fun movieMatchesFilters(
     movie: Movie,
@@ -30,11 +36,11 @@ internal fun movieMatchesFilters(
         return false
     }
 
-    if (filters.minRating > 0.0) {
-        val rating = imdbScore(movie.imdbRating)
+    if (filters.minRating > 0.0 || filters.maxRating < 10.0) {
+        val rating = tmdbScore(movie.rating)
             ?: return false
 
-        if (rating < filters.minRating) {
+        if (rating !in filters.minRating..filters.maxRating) {
             return false
         }
     }

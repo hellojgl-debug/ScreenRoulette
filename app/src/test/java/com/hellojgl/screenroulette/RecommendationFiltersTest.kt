@@ -1,5 +1,6 @@
 package com.hellojgl.screenroulette
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -9,7 +10,6 @@ class RecommendationFiltersTest {
     private fun movie(
         year: String = "2020",
         rating: String = "8.0",
-        imdbRating: String? = "8.0",
         genres: Set<Int> = setOf(28, 35),
         language: String = "en"
     ) = Movie(
@@ -20,8 +20,7 @@ class RecommendationFiltersTest {
         overview = "",
         posterPath = null,
         genreIds = genres,
-        originalLanguage = language,
-        imdbRating = imdbRating
+        originalLanguage = language
     )
 
     private fun filters(
@@ -59,22 +58,43 @@ class RecommendationFiltersTest {
     fun filmBelowMinimumRatingIsRejected() {
         assertFalse(
             movieMatchesFilters(
-                movie(rating = "9.0", imdbRating = "5.5"),
+                movie(rating = "5.5"),
                 filters(minRating = 7.0)
             )
         )
     }
 
     @Test
-    fun highImdbRatingMatchesEvenWithALowTmdbRating() {
-        assertTrue(movieMatchesFilters(movie(rating = "5.5", imdbRating = "8.5"), filters(minRating = 7.0)))
+    fun ratingAtMinimumIsAccepted() {
+        assertTrue(movieMatchesFilters(movie(rating = "7.0"), filters(minRating = 7.0)))
     }
 
     @Test
-    fun unavailableImdbRatingOnlyMatchesWhenThereIsNoMinimum() {
-        val title = movie(rating = "9.0", imdbRating = "N/A")
+    fun unavailableTmdbRatingOnlyMatchesWhenThereIsNoMinimum() {
+        val title = movie(rating = "N/A")
         assertTrue(movieMatchesFilters(title, filters()))
         assertFalse(movieMatchesFilters(title, filters(minRating = 7.0)))
+    }
+
+    @Test
+    fun sliderFloatingPointNoiseDoesNotChangeRatingOrReachTheApi() {
+        val noisyMinimum = 3.500000238418579
+        val noisyMaximum = 8.499999046325684
+        assertEquals("3.50", formatTmdbRatingParameter(noisyMinimum))
+        assertEquals(8.5, normalizeRatingBound(noisyMaximum), 0.0)
+        val range = filters(minRating = normalizeRatingBound(noisyMinimum))
+            .copy(maxRating = normalizeRatingBound(noisyMaximum))
+        assertTrue(movieMatchesFilters(movie(rating = "3.5"), range))
+        assertTrue(movieMatchesFilters(movie(rating = "8.5"), range))
+    }
+
+    @Test
+    fun maximumRatingIsInclusiveAndExcludesPerfectAndUnratedTitles() {
+        val range = filters(minRating = 6.0).copy(maxRating = 8.5)
+        assertTrue(movieMatchesFilters(movie(rating = "8.5"), range))
+        assertFalse(movieMatchesFilters(movie(rating = "8.6"), range))
+        assertFalse(movieMatchesFilters(movie(rating = "10.0"), range))
+        assertFalse(movieMatchesFilters(movie(rating = "N/A"), filters().copy(maxRating = 8.5)))
     }
 
     @Test
