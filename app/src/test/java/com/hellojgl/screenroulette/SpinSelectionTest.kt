@@ -4,8 +4,25 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.random.Random
 
 class SpinSelectionTest {
+    @Test
+    fun spinSamplesAllAvailablePagesWithoutAlwaysStartingOnPageOne() {
+        val orders = (0..4).map { randomDiscoveryPages(50, Random(it)) }
+        for (order in orders) {
+            assertEquals((1..50).toSet(), order.toSet())
+            assertEquals(50, order.size)
+        }
+        assertTrue(orders.any { it.first() != 1 })
+    }
+
+    @Test
+    fun spinDoesNotRequestPagesOutsideTheProviderLimit() {
+        assertEquals((1..500).toSet(), randomDiscoveryPages(900, Random(0)).toSet())
+        assertTrue(randomDiscoveryPages(0, Random(0)).isEmpty())
+    }
+
 
     private val filters = MovieFilters(
         genreIds = emptySet(),
@@ -61,14 +78,13 @@ class SpinSelectionTest {
     }
 
     @Test
-    fun spinReturnsFiveWhenAvailable() {
+    fun spinDefaultsToThreeAndRespectsEachSelectedLimit() {
         val candidates = (1..30).map { movie(it) }
 
-        val result = selectSpinRecommendations(
-            candidates, emptySet(), filters
-        )
-
-        assertEquals(5, result.size)
+        assertEquals(3, selectSpinRecommendations(candidates, emptySet(), filters).size)
+        for (limit in 1..5) {
+            assertEquals(limit, selectSpinRecommendations(candidates, emptySet(), filters, limit).size)
+        }
     }
 
     @Test
