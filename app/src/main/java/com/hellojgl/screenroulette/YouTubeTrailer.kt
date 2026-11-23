@@ -16,5 +16,5 @@ internal fun selectYouTubeTrailer(videos: List<TrailerVideo>): String? {
             youTubeVideoId.matches(it.key)
     }
     val video = trailers.firstOrNull { it.official } ?: trailers.firstOrNull()
-    return video?.let { "https://www.youtube.com/watch?v=${it.key}" }
+    return video?.key
 }

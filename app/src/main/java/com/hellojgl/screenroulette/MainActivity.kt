@@ -2943,46 +2943,50 @@ private fun MovieCard(
 
 @Composable
 private fun WatchTrailerButton(movie: Movie, category: ContentCategory) {
-    val uriHandler = LocalUriHandler.current
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    var trailerId by remember { mutableStateOf<String?>(null) }
 
-    OutlinedButton(
-        modifier = Modifier.fillMaxWidth(),
-        enabled = !loading,
-        onClick = {
-            loading = true
-            message = null
-            scope.launch {
-                try {
-                    val trailer = fetchYouTubeTrailer(movie, category)
-                    if (trailer == null) {
-                        message = "No YouTube trailer is listed for this title."
-                    } else {
-                        uriHandler.openUri(trailer)
+    val videoId = trailerId
+    if (videoId != null) {
+        BackHandler { trailerId = null }
+        YouTubeTrailerPlayer(videoId, onClose = { trailerId = null })
+    } else {
+        OutlinedButton(
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !loading,
+            onClick = {
+                loading = true
+                message = null
+                scope.launch {
+                    try {
+                        trailerId = fetchYouTubeTrailer(movie, category)
+                        if (trailerId == null) {
+                            message = "No YouTube trailer is listed for this title."
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        message = "Couldn’t load the trailer. Try again."
+                    } finally {
+                        loading = false
                     }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    message = "Couldn’t open the trailer. Try again."
-                } finally {
-                    loading = false
                 }
             }
+        ) {
+            Text(if (loading) "Finding trailer…" else "Watch trailer")
         }
-    ) {
-        Text(if (loading) "Finding trailer…" else "Watch trailer on YouTube")
-    }
 
-    message?.let {
-        Text(
-            it,
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.semantics {
-                liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite
-            }
-        )
+        message?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.semantics {
+                    liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite
+                }
+            )
+        }
     }
 }
 

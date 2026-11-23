@@ -13,13 +13,13 @@ class YouTubeTrailerTest {
             TrailerVideo("YouTube", "Teaser", "12345678901", true),
             TrailerVideo("YouTube", "Trailer", "Abc123_-XYZ", true)
         )
-        assertEquals("https://www.youtube.com/watch?v=Abc123_-XYZ", selectYouTubeTrailer(videos))
+        assertEquals("Abc123_-XYZ", selectYouTubeTrailer(videos))
     }
 
     @Test
     fun acceptsAValidTrailerWhenThereIsNoOfficialOne() {
         val videos = listOf(TrailerVideo("YouTube", "Trailer", "abcdefghijk", false))
-        assertEquals("https://www.youtube.com/watch?v=abcdefghijk", selectYouTubeTrailer(videos))
+        assertEquals("abcdefghijk", selectYouTubeTrailer(videos))
     }
 
     @Test

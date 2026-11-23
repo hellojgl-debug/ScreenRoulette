@@ -2,7 +2,7 @@
 
 ScreenRoulette is an Android app for discovering films, TV series, and documentaries using personalized filters and random recommendations.
 
-Open a title’s details to find a YouTube trailer. Films open newest-first within your filters. Spin samples matching releases throughout the selected years, and the filter panel lets you choose one to five titles per spin. The default is three.
+Open a title’s details to watch its YouTube trailer in a compact player. Films open newest-first within your filters. Spin samples matching releases throughout the selected years, and the filter panel lets you choose one to five titles per spin. The default is three.
 
 ## Licence
 
