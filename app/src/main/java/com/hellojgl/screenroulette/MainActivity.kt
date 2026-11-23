@@ -39,6 +39,7 @@ import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1173,17 +1174,17 @@ enum class ContentCategory {
     DOCUMENTARIES
 }
 
-private const val SPLASH_SPIN_DURATION_MS = 1_250
-private const val SPLASH_MINIMUM_AFTER_START_MS = 1_700L
+private const val SPLASH_SPIN_DURATION_MS = 1_500
+private const val SPLASH_MINIMUM_AFTER_START_MS = 2_000L
 private const val SPLASH_LOAD_TIMEOUT_MS = 5_000L
 
 @Composable
 private fun RouletteSplashScreen(startSpin: Boolean, onSpinFinished: () -> Unit) {
-    val wheelAngle = remember { Animatable(127f) }
+    val spinProgress = remember { Animatable(0f) }
     LaunchedEffect(startSpin) {
         if (startSpin) {
-            wheelAngle.animateTo(
-                targetValue = 487f,
+            spinProgress.animateTo(
+                targetValue = 1f,
                 animationSpec = tween(
                     durationMillis = SPLASH_SPIN_DURATION_MS,
                     easing = FastOutSlowInEasing
@@ -1192,7 +1193,6 @@ private fun RouletteSplashScreen(startSpin: Boolean, onSpinFinished: () -> Unit)
             onSpinFinished()
         }
     }
-    val ballAngleDegrees = -127f
 
     val green = Color(0xFF073D2B)
     val gold = Color(0xFFD6B66A)
@@ -1213,6 +1213,14 @@ private fun RouletteSplashScreen(startSpin: Boolean, onSpinFinished: () -> Unit)
             1, 3, 5, 7, 9, 12, 14, 16, 18,
             19, 21, 23, 25, 27, 30, 32, 34, 36
         )
+    }
+
+    val pocketPaint = remember {
+        android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            textAlign = android.graphics.Paint.Align.CENTER
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
     }
 
     Column(
@@ -1261,9 +1269,10 @@ private fun RouletteSplashScreen(startSpin: Boolean, onSpinFinished: () -> Unit)
                     radius = radius * 0.895f
                 )
 
-                // Rotate numbered wheel clockwise.
+                val progress = spinProgress.value
+                // Give the ring and ball different endpoints so their movement is visible.
                 rotate(
-                    degrees = wheelAngle.value,
+                    degrees = 127f + 510f * progress,
                     pivot = Offset(cx, cy)
                 ) {
                     for (i in numbers.indices) {
@@ -1324,19 +1333,8 @@ private fun RouletteSplashScreen(startSpin: Boolean, onSpinFinished: () -> Unit)
 
                     // Draw the real European pocket numbers.
                     drawContext.canvas.nativeCanvas.apply {
-                        val paint = android.graphics.Paint(
-                            android.graphics.Paint.ANTI_ALIAS_FLAG
-                        ).apply {
-                            color = android.graphics.Color.WHITE
-                            textAlign =
-                                android.graphics.Paint.Align.CENTER
-                            textSize = radius * 0.105f
-                            typeface = android.graphics.Typeface
-                                .create(
-                                    android.graphics.Typeface.DEFAULT,
-                                    android.graphics.Typeface.BOLD
-                                )
-                        }
+                        pocketPaint.textSize = radius * 0.105f
+                        val baselineOffset = (pocketPaint.ascent() + pocketPaint.descent()) / 2f
 
                         for (i in numbers.indices) {
                             val theta = Math.toRadians(
@@ -1353,9 +1351,8 @@ private fun RouletteSplashScreen(startSpin: Boolean, onSpinFinished: () -> Unit)
                             drawText(
                                 numbers[i].toString(),
                                 x,
-                                y - (paint.ascent() +
-                                    paint.descent()) / 2f,
-                                paint
+                                y - baselineOffset,
+                                pocketPaint
                             )
                         }
                     }
@@ -1363,7 +1360,7 @@ private fun RouletteSplashScreen(startSpin: Boolean, onSpinFinished: () -> Unit)
 
                 // Ball travels anticlockwise independently.
                 val ballAngle = Math.toRadians(
-                    (-90.0 + ballAngleDegrees)
+                    -217.0 - 690.0 * progress
                 )
                 val ballRadius = radius * 0.93f
                 val ballX = cx +
@@ -1441,13 +1438,17 @@ class MainActivity : ComponentActivity() {
 
             var startSpin by remember { mutableStateOf(false) }
             var spinFinished by remember { mutableStateOf(false) }
+            val windowInfo = LocalWindowInfo.current
 
-            LaunchedEffect(Unit) {
+            LaunchedEffect(windowInfo) {
+                // Start only once the app window is foreground and Android's cover is gone.
+                snapshotFlow { windowInfo.isWindowFocused }.first { it }
                 withTimeoutOrNull(1000) {
                     snapshotFlow { platformSplashDismissed }.first { it }
                 }
                 withFrameNanos { }
-                delay(120)
+                delay(250)
+                snapshotFlow { windowInfo.isWindowFocused }.first { it }
                 startSpin = true
                 withTimeoutOrNull(SPLASH_LOAD_TIMEOUT_MS) {
                     delay(SPLASH_MINIMUM_AFTER_START_MS)
